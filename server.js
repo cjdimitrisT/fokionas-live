@@ -103,7 +103,7 @@ async function onMessage(c, m) {
   if (r.phase !== 'play') return;
   const G = r.G, e = G.ents.find(x => x.pid === c.id); if (!e) return;
   if (m.t === 'pos') {
-    if (!e.alive || G.start > 0 || !isFinite(m.x) || !isFinite(m.y) || (G.bomb && G.bomb.ph === 'buy')) return;
+    if (!e.alive || G.start > 0 || !isFinite(m.x) || !isFinite(m.y) || (G.bomb && G.bomb.ph === 'buy') || (G.soc && G.soc.pause > 0)) return;
     const now = Date.now(), el = Math.min(.5, (now - (c.lastPos || now)) / 1000); c.lastPos = now;
     const allow = SH.speedOf(e) * el * 1.5 + 8 + (G.push.length ? 20 : 0), dx = m.x - e.x, dy = m.y - e.y, d = Math.hypot(dx, dy);
     const ox = e.x, oy = e.y;
@@ -199,7 +199,9 @@ setInterval(() => {
     const B = G.bomb, bo = B ? [['buy', 'live', 'planted', 'end'].indexOf(B.ph), Math.round(B.pt * 10) / 10, B.atk, B.round, B.wins[0], B.wins[1], B.carrier,
       B.dropped ? R1(B.dropped.x) : -1, B.dropped ? R1(B.dropped.y) : -1, B.planted ? R1(B.planted.x) : -1, B.planted ? R1(B.planted.y) : -1,
       Math.round(B.prog * 100), Math.round(SH.bombNeed(G) * 10), B.progBy] : null;
-    const base = { t: 's', bo, gt: Math.round(G.t * 1000) / 1000, time: Math.max(0, G.time), st: G.start, sc: SH.scores(G), e: ents, b: bul, c: coins, z: zones, m: mines, k: strikes, ev: G.ev };
+    const ba = G.ball ? [R1(G.ball.x), R1(G.ball.y), R1(G.ball.vx), R1(G.ball.vy), G.ball.owner, Math.round(G.ball.bomb * 10)] : null;
+    const so = G.soc ? [Math.round(G.soc.el * 10), G.soc.half, G.soc.stop > 0 ? 1 : 0, Math.round(G.soc.pause * 10)] : null;
+    const base = { t: 's', bo, ba, so, gt: Math.round(G.t * 1000) / 1000, time: Math.max(0, G.time), st: G.start, sc: SH.scores(G), e: ents, b: bul, c: coins, z: zones, m: mines, k: strikes, ev: G.ev };
     for (const h of r.humans) {
       const me = G.ents.find(e => e.pid === h.id);
       send(h, Object.assign({ me: me ? { sup: Math.round(me.sup * 100) / 100, resp: Math.min(99, Math.max(0, me.resp)), money: G.bomb ? me.money : null, nades: me.nades || 0 } : null }, base));

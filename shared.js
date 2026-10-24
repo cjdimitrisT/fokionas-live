@@ -134,6 +134,7 @@ const COIN_WALLS = [{x:180,y:380,w:240,h:50},{x:980,y:380,w:240,h:50},{x:180,y:9
 const MAPS = {
   coins: { name: 'Cash Grab', W: 1400, H: 1400, time: 90, walls: COIN_WALLS, desc: 'Coins appear in the middle. The team holding the most coins at the end wins. Die and you drop them.' },
   open: { name: 'Open Arena', W: 1400, H: 1400, time: 120, walls: [], desc: 'Completely open, no walls. First team to reach the kill target wins.' },
+  ball: { name: 'Football', W: 1200, H: 1700, time: 180, walls: null, desc: 'A football pitch with two goals. Dribble the ball by walking into it, shoot to kick it. Most goals after 3 minutes wins. Twice the ball turns into a bomb: kick it and you die, score with it for 2 goals.' },
   bomb: { name: 'Bomb Defuse', W: 1400, H: 1600, time: 60, walls: null, desc: 'Rounds like Counter-Strike. Buy weapons and armor, then one team plants the bomb at site A or B and the other defuses it. First to 4 rounds wins.' },
   rush: { name: 'Crusher Run', W: 1000, H: 2600, time: 120, walls: [], desc: 'Race to the other side! Moving walls push you, and if they squash you against the edge you start over. First to cross wins.' }
 };
@@ -179,10 +180,11 @@ function createMatch(n, map, members) {
     time: M.time, t: 0, kills: [0, 0], target: { 1: 5, 2: 8, 3: 10 }[n], coinT: 0, over: false, start: 2.2, bid: 0, coinId: 0, winner: -1 };
   G.push = rushPush(map, W, H, 0, G.rows);
   if (map === 'bomb') bombInit(G);
+  if (map === 'ball') socInit(G);
   return G;
 }
 const flags = e => (e.slow > 0 ? 1 : 0) | (e.shield > 0 ? 2 : 0) | (e.rage > 0 ? 4 : 0);
-const speedOf = e => e.spd * (e.slow > 0 ? .6 : 1);
+const speedOf = e => e.spd * (e.slow > 0 ? .6 : 1) * (e.dribble ? .82 : 1);
 
 function inRect(w, x, y) { return x > w.x && x < w.x + w.w && y > w.y && y < w.y + w.h; }
 function hitWall(G, x, y) { for (const w of G.walls) if (inRect(w, x, y)) return true; for (const w of G.push) if (inRect(w, x, y)) return true; return false; }
@@ -227,6 +229,7 @@ function kill(G, t, k, crushed) {
   t.alive = false; t.hp = 0; t.resp = crushed ? 2 : 3; t.bursts = []; t.slow = t.shield = t.rage = 0;
   if (k) { k.kills++; G.kills[k.team]++; }
   if (G.bomb) bombOnKill(G, t, k);
+  if (G.ball && G.ball.owner === t.id) { G.ball.owner = -1; G.ball.vx = G.ball.vy = 0; G.ball.cool = .3; }
   G.ev.push({ k: 'burst', x: Math.round(t.x), y: Math.round(t.y), c: t.b.color, n: 30 });
   G.ev.push({ k: crushed ? 'crush' : 'kill', by: k ? k.id : -1, of: t.id, x: Math.round(t.x), y: Math.round(t.y) });
   for (let i = 0; i < t.coins; i++) { const a = rand(0, 6.283), r = rand(20, 70); G.coins.push({ id: ++G.coinId, x: clamp(t.x + Math.cos(a) * r, 30, G.W - 30), y: clamp(t.y + Math.sin(a) * r, 30, G.H - 30) }); }
@@ -324,12 +327,14 @@ function fireSpec(G, e, A, a, d, isSup) {
 function attack(G, e, a, d) {
   if (e.cd > 0 || !e.alive || G.start > 0 || G.over) return false;
   if (G.bomb && G.bomb.ph === 'buy') return false;
+  if (G.soc && G.soc.pause > 0) return false;
+  if (G.ball && G.ball.owner === e.id) { e.cd = .35; e.ang = a; kickBall(G, e, a); return true; }
   e.cd = e.atk.reload; e.lastShot = G.t; e.ang = a;
   fireSpec(G, e, e.atk, a, d, false);
   return true;
 }
 function useSuper(G, e, a, d) {
-  if (!e.alive || e.sup < 1 || G.start > 0 || G.over || (G.bomb && G.bomb.ph === 'buy')) return false;
+  if (!e.alive || e.sup < 1 || G.start > 0 || G.over || (G.bomb && G.bomb.ph === 'buy') || (G.soc && G.soc.pause > 0)) return false;
   e.sup = 0; e.lastShot = G.t; if (a != null) e.ang = a;
   G.ev.push({ k: 'super', id: e.id, x: Math.round(e.x), y: Math.round(e.y), c: e.b.color });
   for (const A of e.b.sup.acts) fireSpec(G, e, A, a == null ? e.ang : a, d, true);
@@ -369,6 +374,7 @@ function onHit(G, b, o) {
 /* ---------- BOTS ---------- */
 function aiUpdate(G, e, dt) {
   if (G.bomb) return aiBomb(G, e, dt);
+  if (G.soc) return aiSoccer(G, e, dt);
   const a = e.ai, t = nearestEnemy(G, e); let mx = 0, my = 0;
   const d = t ? dist(e, t) : 1e9, range = e.atk.range;
   let goal = null;
@@ -437,6 +443,7 @@ function aiShoot(G, e, t, d, dt) {
 
 function scores(G) {
   if (G.bomb) return G.bomb.wins.slice();
+  if (G.soc) return G.soc.goals.slice();
   if (G.map === 'open') return G.kills.slice();
   if (G.map === 'rush') {
     const s = [0, 0];
@@ -453,16 +460,17 @@ function step(G, dt) {
   G.t += dt;
   if (G.rows) G.push = rushPush(G.map, G.W, G.H, G.t, G.rows);
   if (G.bomb) { bombStep(G, dt); if (G.over) return true; }
+  else if (G.soc) { socClock(G, dt); if (G.over) return true; }
   else { if (G.start > 0) { G.start -= dt; return false; }
   G.time -= dt; }
-  const frozen = G.bomb && G.bomb.ph === 'buy';
+  const frozen = (G.bomb && G.bomb.ph === 'buy') || (G.soc && G.soc.pause > 0);
   for (const e of G.ents) {
     const ox = e.x, oy = e.y;
     if (!e.alive) { e.resp -= dt; if (e.resp <= 0) { e.alive = true; e.hp = e.maxhp; e.x = e.sx; e.y = e.sy; e.lastHit = G.t; G.ev.push({ k: 'spawn', id: e.id }); } continue; }
     e.cd = Math.max(0, e.cd - dt * (e.rage > 0 ? 2 : 1));
     e.slow = Math.max(0, e.slow - dt); e.shield = Math.max(0, e.shield - dt); e.rage = Math.max(0, e.rage - dt);
     for (let i = e.bursts.length - 1; i >= 0; i--) { const q = e.bursts[i]; q.t -= dt; if (q.t <= 0) { const A = Object.assign({}, q.A, { burst: null }); fireSpec(G, e, A, q.a, q.d, q.isSup); q.left--; q.t = q.A.burst.gap; if (q.left <= 0) e.bursts.splice(i, 1); } }
-    if (e.ctrl === 'ai') aiUpdate(G, e, dt);
+    if (e.ctrl === 'ai') { if (!frozen || G.bomb) aiUpdate(G, e, dt); }
     else if (e.ctrl === 'input' && !frozen && !e.act) { const sp = speedOf(e); e.x += e.mx * sp * dt; e.y += e.my * sp * dt; resolve(G, e); }
     if (G.push.length && e.alive && pushResolve(G, e)) { kill(G, e, null, true); continue; }
     if (e.ctrl !== 'remote') { e._vx = (e.x - ox) / dt; e._vy = (e.y - oy) / dt; }
@@ -531,6 +539,7 @@ function step(G, dt) {
     if (G.coinT <= 0 && G.coins.length < 12) { G.coinT = 2.2; const a = rand(0, 6.283), r = rand(0, 70); G.coins.push({ id: ++G.coinId, x: G.W / 2 + Math.cos(a) * r, y: G.H / 2 + Math.sin(a) * r }); }
     for (let i = G.coins.length - 1; i >= 0; i--) { const c = G.coins[i]; for (const e of G.ents) if (e.alive && Math.hypot(e.x - c.x, e.y - c.y) < R + 14) { e.coins++; G.coins.splice(i, 1); break; } }
   }
+  if (G.soc) { socBall(G, dt); return !!G.over; }
   if (G.bomb) return false;
   const sc = scores(G);
   if ((G.map === 'open' && (sc[0] >= G.target || sc[1] >= G.target)) || (G.map === 'rush' && G.winner >= 0) || G.time <= 0) { G.over = true; G.result = scores(G); return true; }
@@ -787,6 +796,154 @@ function aiBomb(G, e, dt) {
   aiShoot(G, e, t, d, dt);
 }
 
+/* ---------- FOOTBALL ---------- */
+const SOC = { GY: 90, mouth: 340, half: 90, full: 180, stopMax: 20, bombDur: 15, kick: 1100, ballR: 16, pause: 2.5 };
+function socWalls(W, H) {
+  const l = (W - SOC.mouth) / 2, r = l + SOC.mouth, gy = SOC.GY;
+  return [{ x: 0, y: 0, w: l, h: gy }, { x: r, y: 0, w: W - r, h: gy }, { x: 0, y: H - gy, w: l, h: gy }, { x: r, y: H - gy, w: W - r, h: gy }];
+}
+MAPS.ball.walls = socWalls(MAPS.ball.W, MAPS.ball.H);
+function socInit(G) {
+  G.start = 0;
+  for (const e of G.ents) { e.sy = e.team ? SOC.GY + 110 : G.H - SOC.GY - 110; e.y = e.sy; }
+  G.soc = { goals: [0, 0], el: 0, half: 1, stop: 0, pause: SOC.pause, msg: 'kickoff', bombAt: [rand(40, 60), rand(115, 140)], bombDone: 0 };
+  G.ball = { x: G.W / 2, y: G.H / 2, vx: 0, vy: 0, owner: -1, cool: 0, bomb: 0, kicker: -1, kickT: 0 };
+  G.time = SOC.full;
+  G.ev.push({ k: 'msg', m: 'kickoff' });
+}
+function socReset(G) {
+  for (const e of G.ents) { if (!e.alive) { e.alive = true; e.hp = e.maxhp; } e.x = e.sx; e.y = e.sy; e.resp = 0; e.bursts = []; }
+  G.bul = []; G.zones = []; G.mines = []; G.strikes = [];
+  Object.assign(G.ball, { x: G.W / 2, y: G.H / 2, vx: 0, vy: 0, owner: -1, cool: 0, kicker: -1 });
+}
+/* A "phase" is going on when the ball is close to a goal or moving fast: then the half does not end yet. */
+function socPhase(G) {
+  const b = G.ball, sp = Math.hypot(b.vx, b.vy);
+  return b.y < 450 || b.y > G.H - 450 || sp > 300;
+}
+function socClock(G, dt) {
+  const S = G.soc;
+  if (S.pause > 0) { S.pause -= dt; return; }
+  const limit = S.half === 1 ? SOC.half : SOC.full;
+  if (S.el < limit) { S.el = Math.min(limit, S.el + dt); S.stop = 0; }
+  else if (socPhase(G) && S.stop < SOC.stopMax) S.stop += dt;
+  else if (S.half === 1) { S.half = 2; S.stop = 0; S.pause = 3.5; socReset(G); G.ev.push({ k: 'msg', m: 'half' }); }
+  else { G.over = true; G.result = S.goals.slice(); G.ev.push({ k: 'msg', m: 'full' }); return; }
+  G.time = SOC.full - S.el;
+  // bomb ball
+  const b = G.ball;
+  if (b.bomb > 0) { b.bomb -= dt; if (b.bomb <= 0) { b.bomb = 0; G.ev.push({ k: 'msg', m: 'bombend' }); } }
+  else if (S.bombDone < 2 && S.el >= S.bombAt[S.bombDone]) { S.bombDone++; b.bomb = SOC.bombDur; G.ev.push({ k: 'msg', m: 'bombball' }); }
+}
+function kickBall(G, e, a) {
+  const b = G.ball;
+  b.owner = -1; b.kicker = e.id; b.kickT = .4; b.cool = .12;
+  if (b.bomb > 0) {
+    b.vx = b.vy = 0;
+    G.ev.push({ k: 'boom', x: Math.round(b.x), y: Math.round(b.y), r: 120, v: 1 });
+    G.ev.push({ k: 'msg', m: 'bombkick', id: e.id });
+    kill(G, e, null);
+    return;
+  }
+  b.vx = Math.cos(a) * SOC.kick; b.vy = Math.sin(a) * SOC.kick;
+  G.ev.push({ k: 'kick', x: Math.round(b.x), y: Math.round(b.y) });
+}
+function socGoal(G, team) {
+  const S = G.soc, b = G.ball, pts = b.bomb > 0 ? 2 : 1;
+  S.goals[team] += pts;
+  const by = G.ents.find(e => e.id === (b.owner >= 0 ? b.owner : b.kicker));
+  G.ev.push({ k: 'goal', team, pts, by: by ? by.name : '', x: Math.round(b.x), y: Math.round(b.y) });
+  if (b.bomb > 0) { b.bomb = 0; G.ev.push({ k: 'boom', x: Math.round(b.x), y: Math.round(b.y), r: 160, v: 1 }); }
+  S.pause = SOC.pause; socReset(G);
+}
+function socBall(G, dt) {
+  const b = G.ball, S = G.soc, r = SOC.ballR;
+  for (const e of G.ents) e.dribble = e.id === b.owner;
+  if (S.pause > 0) return;
+  // players bump into each other instead of overlapping
+  const al = G.ents.filter(e => e.alive);
+  for (let i = 0; i < al.length; i++) for (let j = i + 1; j < al.length; j++) {
+    const p = al[i], q = al[j], dx = q.x - p.x, dy = q.y - p.y, d = Math.hypot(dx, dy);
+    if (d > 0 && d < R * 2) { const k = (R * 2 - d) / 2; p.x -= dx / d * k; p.y -= dy / d * k; q.x += dx / d * k; q.y += dy / d * k; resolve(G, p); resolve(G, q); }
+  }
+  b.cool = Math.max(0, b.cool - dt); b.kickT = Math.max(0, b.kickT - dt); b.steal = Math.max(0, (b.steal || 0) - dt);
+  let o = b.owner >= 0 ? G.ents.find(e => e.id === b.owner) : null;
+  if (o && !o.alive) { b.owner = -1; o = null; }
+  if (o) {
+    // dribble: the ball stays just in front of the player
+    const tx = o.x + Math.cos(o.ang) * (R + r + 2), ty = o.y + Math.sin(o.ang) * (R + r + 2);
+    b.vx = (tx - b.x) / dt; b.vy = (ty - b.y) / dt; b.x = tx; b.y = ty;
+    // an opponent who touches the ball steals it
+    if (b.steal <= 0) for (const e of G.ents) if (e.alive && e.team !== o.team && Math.hypot(e.x - b.x, e.y - b.y) < R + r + 8) { b.owner = e.id; b.steal = 1.2; G.ev.push({ k: 'msg', m: 'steal', id: e.id }); o = e; break; }
+  } else {
+    const ox = b.x, oy = b.y;
+    b.x += b.vx * dt; b.y += b.vy * dt;
+    const f = Math.exp(-1.1 * dt); b.vx *= f; b.vy *= f;
+    if (Math.hypot(b.vx, b.vy) < 8) b.vx = b.vy = 0;
+    if (b.x < r) { b.x = r; b.vx = Math.abs(b.vx) * .8; }
+    if (b.x > G.W - r) { b.x = G.W - r; b.vx = -Math.abs(b.vx) * .8; }
+    if (b.y < r) { b.y = r; b.vy = Math.abs(b.vy) * .8; }
+    if (b.y > G.H - r) { b.y = G.H - r; b.vy = -Math.abs(b.vy) * .8; }
+    for (const w of G.walls) if (b.x > w.x - r && b.x < w.x + w.w + r && b.y > w.y - r && b.y < w.y + w.h + r) {
+      const inX = ox > w.x - r && ox < w.x + w.w + r;
+      if (inX) b.vy = -b.vy * .8; else b.vx = -b.vx * .8;
+      b.x = ox; b.y = oy; break;
+    }
+    if (b.cool <= 0) {
+      let best = null, bd = R + r + 4;
+      for (const e of G.ents) { if (!e.alive || (e.id === b.kicker && b.kickT > 0)) continue; const d = Math.hypot(e.x - b.x, e.y - b.y); if (d < bd) { bd = d; best = e; } }
+      if (best) { b.owner = best.id; b.vx = b.vy = 0; b.steal = .8; }
+    }
+  }
+  // goals: team 0 attacks the top goal, team 1 the bottom goal
+  const inMouth = Math.abs(b.x - G.W / 2) < SOC.mouth / 2;
+  if (inMouth && b.y < SOC.GY - 8) return socGoal(G, 0);
+  if (inMouth && b.y > G.H - SOC.GY + 8) return socGoal(G, 1);
+}
+function aiSoccer(G, e, dt) {
+  const b = G.ball, S = G.soc, a = e.ai;
+  if (S.pause > 0) return;
+  const foeGoal = { x: G.W / 2, y: e.team ? G.H - SOC.GY / 2 : SOC.GY / 2 }, myGoal = { x: G.W / 2, y: e.team ? SOC.GY + 40 : G.H - SOC.GY - 40 };
+  const mates = G.ents.filter(o => o.team === e.team && o.alive);
+  const owner = b.owner >= 0 ? G.ents.find(o => o.id === b.owner) : null;
+  let tx = e.x, ty = e.y, mayShoot = true;
+  if (owner === e) {
+    mayShoot = false;
+    const d = dist(e, foeGoal);
+    // dodge the closest opponent in front
+    let side = 0; for (const o of G.ents) if (o.alive && o.team !== e.team && dist(o, e) < 160) side = o.x < e.x ? 1 : -1;
+    tx = foeGoal.x + side * 120; ty = foeGoal.y;
+    if (!b.bomb && d < 430 && e.cd <= 0 && Math.random() < dt * 4) {
+      const ang = Math.atan2(foeGoal.y - e.y, rand(-SOC.mouth * .35, SOC.mouth * .35) + foeGoal.x - e.x) + rand(-1, 1) * (1 - e.skill) * .25;
+      attack(G, e, ang); return;
+    }
+  } else if (!owner) {
+    const chaser = mates.slice().sort((p, q) => dist(p, b) - dist(q, b))[0];
+    if (chaser === e) { const g = Math.atan2(foeGoal.y - b.y, foeGoal.x - b.x); tx = b.x - Math.cos(g) * 20; ty = b.y - Math.sin(g) * 20; }
+    else if (mates.indexOf(e) % 2 === 0) { tx = b.x * .5 + myGoal.x * .5; ty = b.y * .4 + myGoal.y * .6; }
+    else { tx = clamp(b.x + (e.x < G.W / 2 ? -200 : 200), 80, G.W - 80); ty = b.y + (foeGoal.y > b.y ? 250 : -250); }
+  } else if (owner.team === e.team) {
+    tx = clamp(owner.x + (e.x < owner.x ? -220 : 220), 80, G.W - 80); ty = owner.y + (foeGoal.y > owner.y ? 260 : -260);
+  } else {
+    const closest = mates.slice().sort((p, q) => dist(p, owner) - dist(q, owner))[0];
+    if (closest === e || mates.length < 2) { tx = b.x; ty = b.y; }
+    else { tx = owner.x * .4 + myGoal.x * .6; ty = owner.y * .4 + myGoal.y * .6; }
+  }
+  let mx = tx - e.x, my = ty - e.y;
+  const l = Math.hypot(mx, my);
+  if (l > 12) { mx /= l; my /= l; } else { mx = my = 0; }
+  const sp = speedOf(e);
+  e.x += mx * sp * dt; e.y += my * sp * dt; resolve(G, e);
+  if (mx || my) e.ang = Math.atan2(my, mx);
+  if (owner === e) e.ang = Math.atan2(my || (foeGoal.y - e.y), mx || 0);
+  if (mayShoot) {
+    let t = owner && owner.team !== e.team && dist(owner, e) < e.atk.range ? owner : null, d = t ? dist(e, t) : 1e9;
+    if (!t) { t = nearestEnemy(G, e, e.atk.range * 1.1); d = t ? dist(e, t) : 1e9; }
+    aiShoot(G, e, t, d, dt);
+    if (mx || my) e.ang = Math.atan2(my, mx);
+  }
+}
+
 /* Rewards for one player after a match. */
 function rewards(res, kills, coinsHeld, map, wins, lvl) {
   const bonus = map === 'bomb' && res === 'w' ? 30 : 0;
@@ -803,7 +960,7 @@ function pickBot(wins) {
   return ROSTER[Math.floor(rand(lo, hi + 1))];
 }
 
-const SHARED = { WEAPONS, WEAPON_KEYS, GEAR, ECON, BOMB, bombSites, buy, throwNade, canPlant, canDefuse, bombNeed, ROSTER, FOK, MAPS, MAP_NAMES, RUSH_GOAL, R, mult, enemyLvl, enemySkill, isPro, rand, clamp, dist, monthsSince,
+const SHARED = { SOC, socWalls, WEAPONS, WEAPON_KEYS, GEAR, ECON, BOMB, bombSites, buy, throwNade, canPlant, canDefuse, bombNeed, ROSTER, FOK, MAPS, MAP_NAMES, RUSH_GOAL, R, mult, enemyLvl, enemySkill, isPro, rand, clamp, dist, monthsSince,
   pickBot, createMatch, step, attack, useSuper, autoAim, superRange, resolve, pushResolve, rushPush, rushRows, nearestEnemy, scores, rewards, flags, speedOf };
 if (typeof module !== 'undefined' && module.exports) module.exports = SHARED; else root.SHARED = SHARED;
 })(typeof self !== 'undefined' ? self : this);
