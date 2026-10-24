@@ -103,7 +103,7 @@ async function onMessage(c, m) {
   if (r.phase !== 'play') return;
   const G = r.G, e = G.ents.find(x => x.pid === c.id); if (!e) return;
   if (m.t === 'pos') {
-    if (!e.alive || G.start > 0 || !isFinite(m.x) || !isFinite(m.y)) return;
+    if (!e.alive || G.start > 0 || !isFinite(m.x) || !isFinite(m.y) || (G.bomb && G.bomb.ph === 'buy')) return;
     const now = Date.now(), el = Math.min(.5, (now - (c.lastPos || now)) / 1000); c.lastPos = now;
     const allow = SH.speedOf(e) * el * 1.5 + 8 + (G.push.length ? 20 : 0), dx = m.x - e.x, dy = m.y - e.y, d = Math.hypot(dx, dy);
     const ox = e.x, oy = e.y;
@@ -114,6 +114,9 @@ async function onMessage(c, m) {
     if (isFinite(m.a)) e.ang = m.a;
   } else if (m.t === 'fire' && isFinite(m.a)) SH.attack(G, e, m.a, isFinite(m.d) ? m.d : null);
   else if (m.t === 'super') SH.useSuper(G, e, isFinite(m.a) ? m.a : e.ang, isFinite(m.d) ? m.d : null);
+  else if (m.t === 'buy' && G.bomb) SH.buy(G, e, String(m.item));
+  else if (m.t === 'act' && G.bomb) e.act = !!m.on;
+  else if (m.t === 'nade' && G.bomb && isFinite(m.a)) SH.throwNade(G, e, m.a, isFinite(m.d) ? m.d : 320);
 }
 
 function leave(c) {
@@ -148,7 +151,7 @@ setInterval(() => {
 }, 1000);
 
 function broadcast(r, m) { for (const h of r.humans) send(h, m); }
-function voteList(r) { const v = { coins: [], open: [], rush: [] }; for (const h of r.humans) { const x = r.votes.get(h.id); if (x) v[x].push(h.nick); } return v; }
+function voteList(r) { const v = {}; for (const k of Object.keys(SH.MAPS)) v[k] = []; for (const h of r.humans) { const x = r.votes.get(h.id); if (x) v[x].push(h.nick); } return v; }
 
 function makeRoom(mode, humans) {
   const r = { mode, humans, phase: 'vote', votes: new Map(), G: null };
@@ -162,8 +165,8 @@ function makeRoom(mode, humans) {
 function endVote(r) {
   if (r.phase !== 'vote' || !rooms.has(r)) return;
   clearTimeout(r.voteTimer);
-  const cnt = { coins: 0, open: 0, rush: 0 }; for (const v of r.votes.values()) cnt[v]++;
-  const top = Math.max(cnt.coins, cnt.open, cnt.rush), best = Object.keys(cnt).filter(k => cnt[k] === top);
+  const cnt = {}; for (const k of Object.keys(SH.MAPS)) cnt[k] = 0; for (const v of r.votes.values()) cnt[v]++;
+  const top = Math.max(...Object.values(cnt)), best = Object.keys(cnt).filter(k => cnt[k] === top);
   const map = best[Math.floor(Math.random() * best.length)], tie = best.length > 1;
   const n = r.mode, avgW = r.humans.reduce((s, h) => s + h.wins, 0) / r.humans.length;
   const members = r.humans.map(h => ({ bid: h.bid, lvl: h.lvl, team: h.team, ctrl: 'remote', nick: h.nick, pro: !!h.pro, pid: h.id }));
@@ -187,16 +190,19 @@ setInterval(() => {
   for (const r of rooms) {
     if (r.phase !== 'play') continue;
     const G = r.G, done = SH.step(G, TICK);
-    const ents = G.ents.map(e => [e.id, R1(e.x), R1(e.y), Math.round(e.ang * 100), R1(e.hp), e.alive ? 1 : 0, e.coins, e.kills, SH.flags(e)]);
+    const ents = G.ents.map(e => [e.id, R1(e.x), R1(e.y), Math.round(e.ang * 100), R1(e.hp), e.alive ? 1 : 0, e.coins, e.kills, SH.flags(e), G.bomb ? SH.WEAPON_KEYS.indexOf(e.wpn) : -1, G.bomb ? (e.armor ? 1 : 0) | (e.kit ? 2 : 0) : 0]);
     const bul = G.bul.map(b => [b.id, R1(b.x), R1(b.y), R1(b.vx), R1(b.vy), b.team, b.r, b.vis, R1(b.h || 0)]);
     const coins = G.coins.map(c => [c.id, R1(c.x), R1(c.y)]);
     const zones = G.zones.map(z => [R1(z.x), R1(z.y), z.r, z.vis]);
     const mines = G.mines.map(m => [R1(m.x), R1(m.y), m.team, m.arm <= 0 ? 1 : 0]);
     const strikes = G.strikes.map(s => [R1(s.x), R1(s.y), s.rad, Math.round((1 - s.t / s.T) * 100)]);
-    const base = { t: 's', gt: Math.round(G.t * 1000) / 1000, time: Math.max(0, G.time), st: G.start, sc: SH.scores(G), e: ents, b: bul, c: coins, z: zones, m: mines, k: strikes, ev: G.ev };
+    const B = G.bomb, bo = B ? [['buy', 'live', 'planted', 'end'].indexOf(B.ph), Math.round(B.pt * 10) / 10, B.atk, B.round, B.wins[0], B.wins[1], B.carrier,
+      B.dropped ? R1(B.dropped.x) : -1, B.dropped ? R1(B.dropped.y) : -1, B.planted ? R1(B.planted.x) : -1, B.planted ? R1(B.planted.y) : -1,
+      Math.round(B.prog * 100), Math.round(SH.bombNeed(G) * 10), B.progBy] : null;
+    const base = { t: 's', bo, gt: Math.round(G.t * 1000) / 1000, time: Math.max(0, G.time), st: G.start, sc: SH.scores(G), e: ents, b: bul, c: coins, z: zones, m: mines, k: strikes, ev: G.ev };
     for (const h of r.humans) {
       const me = G.ents.find(e => e.pid === h.id);
-      send(h, Object.assign({ me: me ? { sup: Math.round(me.sup * 100) / 100, resp: Math.max(0, me.resp) } : null }, base));
+      send(h, Object.assign({ me: me ? { sup: Math.round(me.sup * 100) / 100, resp: Math.min(99, Math.max(0, me.resp)), money: G.bomb ? me.money : null, nades: me.nades || 0 } : null }, base));
     }
     G.ev = [];
     if (done) {

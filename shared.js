@@ -134,9 +134,10 @@ const COIN_WALLS = [{x:180,y:380,w:240,h:50},{x:980,y:380,w:240,h:50},{x:180,y:9
 const MAPS = {
   coins: { name: 'Cash Grab', W: 1400, H: 1400, time: 90, walls: COIN_WALLS, desc: 'Coins appear in the middle. The team holding the most coins at the end wins. Die and you drop them.' },
   open: { name: 'Open Arena', W: 1400, H: 1400, time: 120, walls: [], desc: 'Completely open, no walls. First team to reach the kill target wins.' },
+  bomb: { name: 'Bomb Defuse', W: 1400, H: 1600, time: 60, walls: null, desc: 'Rounds like Counter-Strike. Buy weapons and armor, then one team plants the bomb at site A or B and the other defuses it. First to 4 rounds wins.' },
   rush: { name: 'Crusher Run', W: 1000, H: 2600, time: 120, walls: [], desc: 'Race to the other side! Moving walls push you, and if they squash you against the edge you start over. First to cross wins.' }
 };
-const MAP_NAMES = { coins: MAPS.coins.name, open: MAPS.open.name, rush: MAPS.rush.name };
+const MAP_NAMES = Object.fromEntries(Object.entries(MAPS).map(([k, m]) => [k, m.name]));
 const RUSH_GOAL = 110;
 
 /* Crusher Run walls: rows that slide left and right; their position depends only on match time. */
@@ -168,7 +169,7 @@ function createMatch(n, map, members) {
     const sx = W / 2 + (slot - (n - 1) / 2) * 170, sy = map === 'rush' ? (m.team ? 90 : H - 90) : (m.team ? 150 : H - 150);
     ents.push({ id: i, pid: m.pid || null, b, bid: b.id, lvl: m.lvl, team: m.team, ctrl: m.ctrl, skill: m.skill || .5,
       name: m.nick || b.name, pro: !!m.pro, human: m.ctrl !== 'ai',
-      maxhp: Math.round(b.hp * dm), hp: Math.round(b.hp * dm), dm, spd: b.spd, range: b.atk.range,
+      maxhp: Math.round(b.hp * dm), hp: Math.round(b.hp * dm), dm, spd: b.spd, range: b.atk.range, atk: b.atk,
       supNeed: 3600 * dm, x: sx, y: sy, sx, sy, ang: m.team ? Math.PI / 2 : -Math.PI / 2,
       cd: 0, alive: true, resp: 0, sup: 0, coins: 0, kills: 0, lastHit: -9, lastShot: -9,
       slow: 0, shield: 0, rage: 0, bursts: [], mx: 0, my: 0, _vx: 0, _vy: 0,
@@ -177,6 +178,7 @@ function createMatch(n, map, members) {
   const G = { n, map, W, H, walls: M.walls, rows: map === 'rush' ? rushRows(W, H) : null, push: [], ents, bul: [], coins: [], zones: [], mines: [], strikes: [], ev: [],
     time: M.time, t: 0, kills: [0, 0], target: { 1: 5, 2: 8, 3: 10 }[n], coinT: 0, over: false, start: 2.2, bid: 0, coinId: 0, winner: -1 };
   G.push = rushPush(map, W, H, 0, G.rows);
+  if (map === 'bomb') bombInit(G);
   return G;
 }
 const flags = e => (e.slow > 0 ? 1 : 0) | (e.shield > 0 ? 2 : 0) | (e.rage > 0 ? 4 : 0);
@@ -208,12 +210,13 @@ function pushResolve(G, e) {
 }
 function enemiesOf(G, team) { return G.ents.filter(o => o.alive && o.team !== team); }
 function nearestEnemy(G, e, maxd) { let best = null, bd = maxd || 1e9; for (const o of G.ents) if (o.alive && o.team !== e.team) { const d = dist(e, o); if (d < bd) { bd = d; best = o; } } return best; }
-function superRange(e) { const a = e.b.sup.acts.find(x => x.range); return a ? a.range : e.b.atk.range; }
+function superRange(e) { const a = e.b.sup.acts.find(x => x.range); return a ? a.range : (e.atk || e.b.atk).range; }
 
 /* ---------- COMBAT ---------- */
 function hurt(G, t, amount, own, noCharge) {
   if (!t.alive || G.over) return;
   if (t.shield > 0) amount *= .4;
+  if (t.armor) amount *= .7;
   amount = Math.round(amount);
   t.hp -= amount; t.lastHit = G.t;
   G.ev.push({ k: 'hit', x: Math.round(t.x), y: Math.round(t.y), v: amount, id: t.id, team: t.team });
@@ -223,6 +226,7 @@ function hurt(G, t, amount, own, noCharge) {
 function kill(G, t, k, crushed) {
   t.alive = false; t.hp = 0; t.resp = crushed ? 2 : 3; t.bursts = []; t.slow = t.shield = t.rage = 0;
   if (k) { k.kills++; G.kills[k.team]++; }
+  if (G.bomb) bombOnKill(G, t, k);
   G.ev.push({ k: 'burst', x: Math.round(t.x), y: Math.round(t.y), c: t.b.color, n: 30 });
   G.ev.push({ k: crushed ? 'crush' : 'kill', by: k ? k.id : -1, of: t.id, x: Math.round(t.x), y: Math.round(t.y) });
   for (let i = 0; i < t.coins; i++) { const a = rand(0, 6.283), r = rand(20, 70); G.coins.push({ id: ++G.coinId, x: clamp(t.x + Math.cos(a) * r, 30, G.W - 30), y: clamp(t.y + Math.sin(a) * r, 30, G.H - 30) }); }
@@ -319,12 +323,13 @@ function fireSpec(G, e, A, a, d, isSup) {
 }
 function attack(G, e, a, d) {
   if (e.cd > 0 || !e.alive || G.start > 0 || G.over) return false;
-  e.cd = e.b.atk.reload; e.lastShot = G.t; e.ang = a;
-  fireSpec(G, e, e.b.atk, a, d, false);
+  if (G.bomb && G.bomb.ph === 'buy') return false;
+  e.cd = e.atk.reload; e.lastShot = G.t; e.ang = a;
+  fireSpec(G, e, e.atk, a, d, false);
   return true;
 }
 function useSuper(G, e, a, d) {
-  if (!e.alive || e.sup < 1 || G.start > 0 || G.over) return false;
+  if (!e.alive || e.sup < 1 || G.start > 0 || G.over || (G.bomb && G.bomb.ph === 'buy')) return false;
   e.sup = 0; e.lastShot = G.t; if (a != null) e.ang = a;
   G.ev.push({ k: 'super', id: e.id, x: Math.round(e.x), y: Math.round(e.y), c: e.b.color });
   for (const A of e.b.sup.acts) fireSpec(G, e, A, a == null ? e.ang : a, d, true);
@@ -363,8 +368,9 @@ function onHit(G, b, o) {
 
 /* ---------- BOTS ---------- */
 function aiUpdate(G, e, dt) {
+  if (G.bomb) return aiBomb(G, e, dt);
   const a = e.ai, t = nearestEnemy(G, e); let mx = 0, my = 0;
-  const d = t ? dist(e, t) : 1e9, range = e.b.atk.range;
+  const d = t ? dist(e, t) : 1e9, range = e.atk.range;
   let goal = null;
   if (G.map === 'coins') {
     const myTeam = G.ents.filter(o => o.team === e.team).reduce((s, o) => s + o.coins, 0);
@@ -395,7 +401,7 @@ function aiUpdate(G, e, dt) {
   else if (t) {
     if (e.hp < e.maxhp * .3 && e.skill > .45 && d < range) { const ga = Math.atan2(e.sy - e.y, e.sx - e.x); mx = Math.cos(ga); my = Math.sin(ga); }
     else {
-      const melee = e.b.atk.k === 'punch' || range < 280, ta = Math.atan2(t.y - e.y, t.x - e.x), want = melee ? range * .5 : range * .72, see = los(G, e, t) || e.b.atk.k === 'lob';
+      const melee = e.atk.k === 'punch' || range < 280, ta = Math.atan2(t.y - e.y, t.x - e.x), want = melee ? range * .5 : range * .72, see = los(G, e, t) || e.atk.k === 'lob';
       let f = 0; if (!see || d > want + 40) f = 1; else if (d < want - 80) f = -1;
       if (melee && d > want) { mx = Math.cos(ta); my = Math.sin(ta); }
       else { mx = Math.cos(ta) * f + Math.cos(ta + Math.PI / 2) * a.strafe * .7; my = Math.sin(ta) * f + Math.sin(ta + Math.PI / 2) * a.strafe * .7; }
@@ -408,12 +414,16 @@ function aiUpdate(G, e, dt) {
   if (l > 0 && G.map !== 'rush' && Math.hypot(e.x - a.px, e.y - a.py) < sp * dt * .3) { const r = rand(0, 6.283); a.unstick = .5; a.ux = Math.cos(r); a.uy = Math.sin(r); }
   a.px = e.x; a.py = e.y;
   if (l > 0) e.ang = Math.atan2(my, mx);
+  aiShoot(G, e, t, d, dt);
+}
+function aiShoot(G, e, t, d, dt) {
+  const a = e.ai, range = e.atk.range;
   a.react -= dt;
-  const k = e.b.atk.k, overWalls = k === 'lob' || k === 'mine';
+  const k = e.atk.k, overWalls = k === 'lob' || k === 'mine';
   if (t && d < range * .95 && (overWalls || los(G, e, t))) {
     e.ang = Math.atan2(t.y - e.y, t.x - e.x);
     if (a.react <= 0 && e.cd <= 0) {
-      const sp2 = e.b.atk.bs || 900, tt = (k === 'lob' ? .6 : k === 'beam' || k === 'punch' ? 0 : d / sp2) * e.skill, tx = t.x + (t._vx || 0) * tt, ty = t.y + (t._vy || 0) * tt;
+      const sp2 = e.atk.bs || 900, tt = (k === 'lob' ? .6 : k === 'beam' || k === 'punch' ? 0 : d / sp2) * e.skill, tx = t.x + (t._vx || 0) * tt, ty = t.y + (t._vy || 0) * tt;
       const ang = Math.atan2(ty - e.y, tx - e.x) + rand(-1, 1) * (1 - e.skill) * .45;
       if (attack(G, e, ang, Math.hypot(tx - e.x, ty - e.y))) a.react = rand(0, (1 - e.skill) * .7);
     }
@@ -426,6 +436,7 @@ function aiUpdate(G, e, dt) {
 }
 
 function scores(G) {
+  if (G.bomb) return G.bomb.wins.slice();
   if (G.map === 'open') return G.kills.slice();
   if (G.map === 'rush') {
     const s = [0, 0];
@@ -441,8 +452,10 @@ function step(G, dt) {
   if (G.over) return true;
   G.t += dt;
   if (G.rows) G.push = rushPush(G.map, G.W, G.H, G.t, G.rows);
-  if (G.start > 0) { G.start -= dt; return false; }
-  G.time -= dt;
+  if (G.bomb) { bombStep(G, dt); if (G.over) return true; }
+  else { if (G.start > 0) { G.start -= dt; return false; }
+  G.time -= dt; }
+  const frozen = G.bomb && G.bomb.ph === 'buy';
   for (const e of G.ents) {
     const ox = e.x, oy = e.y;
     if (!e.alive) { e.resp -= dt; if (e.resp <= 0) { e.alive = true; e.hp = e.maxhp; e.x = e.sx; e.y = e.sy; e.lastHit = G.t; G.ev.push({ k: 'spawn', id: e.id }); } continue; }
@@ -450,10 +463,10 @@ function step(G, dt) {
     e.slow = Math.max(0, e.slow - dt); e.shield = Math.max(0, e.shield - dt); e.rage = Math.max(0, e.rage - dt);
     for (let i = e.bursts.length - 1; i >= 0; i--) { const q = e.bursts[i]; q.t -= dt; if (q.t <= 0) { const A = Object.assign({}, q.A, { burst: null }); fireSpec(G, e, A, q.a, q.d, q.isSup); q.left--; q.t = q.A.burst.gap; if (q.left <= 0) e.bursts.splice(i, 1); } }
     if (e.ctrl === 'ai') aiUpdate(G, e, dt);
-    else if (e.ctrl === 'input') { const sp = speedOf(e); e.x += e.mx * sp * dt; e.y += e.my * sp * dt; resolve(G, e); }
+    else if (e.ctrl === 'input' && !frozen && !e.act) { const sp = speedOf(e); e.x += e.mx * sp * dt; e.y += e.my * sp * dt; resolve(G, e); }
     if (G.push.length && e.alive && pushResolve(G, e)) { kill(G, e, null, true); continue; }
     if (e.ctrl !== 'remote') { e._vx = (e.x - ox) / dt; e._vy = (e.y - oy) / dt; }
-    if (G.t - e.lastHit > 3 && G.t - e.lastShot > 2.5 && e.hp < e.maxhp) e.hp = Math.min(e.maxhp, e.hp + e.maxhp * .13 * dt);
+    if (!G.bomb && G.t - e.lastHit > 3 && G.t - e.lastShot > 2.5 && e.hp < e.maxhp) e.hp = Math.min(e.maxhp, e.hp + e.maxhp * .13 * dt);
     if (G.map === 'rush' && G.winner < 0 && (e.team === 0 ? e.y <= RUSH_GOAL : e.y >= G.H - RUSH_GOAL)) G.winner = e.team;
   }
   // projectiles
@@ -518,16 +531,269 @@ function step(G, dt) {
     if (G.coinT <= 0 && G.coins.length < 12) { G.coinT = 2.2; const a = rand(0, 6.283), r = rand(0, 70); G.coins.push({ id: ++G.coinId, x: G.W / 2 + Math.cos(a) * r, y: G.H / 2 + Math.sin(a) * r }); }
     for (let i = G.coins.length - 1; i >= 0; i--) { const c = G.coins[i]; for (const e of G.ents) if (e.alive && Math.hypot(e.x - c.x, e.y - c.y) < R + 14) { e.coins++; G.coins.splice(i, 1); break; } }
   }
+  if (G.bomb) return false;
   const sc = scores(G);
   if ((G.map === 'open' && (sc[0] >= G.target || sc[1] >= G.target)) || (G.map === 'rush' && G.winner >= 0) || G.time <= 0) { G.over = true; G.result = scores(G); return true; }
   return false;
 }
 
+
+/* ---------- BOMB DEFUSE ---------- */
+const WEAPONS = {
+  pistol:  { name: 'Pistol',  price: 0,    desc: 'Free. Reliable at medium range.',            k: 'shot', dmg: 450,  range: 430, reload: .42, bs: 950,  r: 5 },
+  smg:     { name: 'SMG',     price: 1200, desc: 'Sprays very fast at short range.',           k: 'shot', jit: .1, dmg: 230, range: 400, reload: .12, bs: 1000, r: 4 },
+  shotgun: { name: 'Shotgun', price: 1500, desc: 'Six pellets. Deadly up close.',              k: 'shot', n: 6, spread: .5, dmg: 270, range: 270, reload: .85, bs: 720, r: 5 },
+  rifle:   { name: 'Rifle',   price: 2700, desc: 'Fast, accurate and strong.',                 k: 'shot', jit: .03, dmg: 520, range: 540, reload: .22, bs: 1150, r: 5 },
+  sniper:  { name: 'Sniper',  price: 4250, desc: 'One huge shot that goes through enemies.',   k: 'shot', pierce: 1, dmg: 2400, range: 780, reload: 1.4, bs: 1600, r: 6 }
+};
+const WEAPON_KEYS = Object.keys(WEAPONS);
+const GEAR = {
+  armor: { name: 'Armor',      price: 650, desc: 'Take 30% less damage. Kept while you survive.' },
+  kit:   { name: 'Defuse kit', price: 400, desc: 'Defuse the bomb twice as fast.', def: 1 },
+  nade:  { name: 'Grenade',    price: 300, desc: 'One explosive you throw over walls.' }
+};
+const NADE = { k: 'lob', dmg: 1500, range: 480, boom: 130, r: 9, vis: 6 };
+const ECON = { start: 800, max: 16000, kill: 300, win: 3250, loss: 1900, lossStep: 500, lossMax: 3400, plant: 300 };
+const BOMB = { buy: 8, round: 60, timer: 30, plant: 3, defuse: 5, kitDefuse: 2.5, end: 4, win: 4, swap: 3, siteR: 110, blast: 380 };
+const BOMB_HALF = [{x:0,y:560,w:260,h:50},{x:1140,y:560,w:260,h:50},{x:470,y:250,w:50,h:230},{x:880,y:250,w:50,h:230},{x:620,y:420,w:160,h:50},{x:190,y:190,w:70,h:70},{x:1140,y:400,w:70,h:70},{x:330,y:720,w:180,h:50}];
+const BOMB_WALLS = BOMB_HALF.concat(BOMB_HALF.map(w => ({ x: 1400 - w.x - w.w, y: 1600 - w.y - w.h, w: w.w, h: w.h })), [{ x: 660, y: 700, w: 80, h: 200 }]);
+MAPS.bomb.walls = BOMB_WALLS;
+const SITES_TOP = [{ x: 250, y: 330, name: 'A' }, { x: 1150, y: 330, name: 'B' }];
+/* The defending team's sites are on its own half. */
+function bombSites(G, defTeam) {
+  if (defTeam == null) defTeam = 1 - G.bomb.atk;
+  return defTeam === 1 ? SITES_TOP : SITES_TOP.map(s => ({ x: G.W - s.x, y: G.H - s.y, name: s.name }));
+}
+function setWeapon(e) { e.atk = WEAPONS[e.wpn] || WEAPONS.pistol; e.range = e.atk.range; }
+function bombInit(G) {
+  G.start = 0; G.time = BOMB.buy;
+  G.bomb = { round: 0, wins: [0, 0], atk: 0, ph: 'buy', pt: BOMB.buy, carrier: -1, dropped: null, planted: null, prog: 0, progBy: -1, lossStreak: [0, 0], target: 0, lastWin: -1, why: '' };
+  for (const e of G.ents) { e.money = ECON.start; e.wpn = 'pistol'; e.armor = 0; e.kit = 0; e.nades = 0; e.act = false; e.resp = 0; }
+  startRound(G);
+}
+function startRound(G) {
+  const B = G.bomb;
+  B.round++;
+  if (B.round === BOMB.swap + 1) {
+    B.atk = 1 - B.atk; B.lossStreak = [0, 0];
+    for (const e of G.ents) { e.money = ECON.start; e.wpn = 'pistol'; e.armor = 0; e.kit = 0; e.nades = 0; e.alive = true; }
+    G.ev.push({ k: 'msg', m: 'swap' });
+  }
+  B.ph = 'buy'; B.pt = BOMB.buy; B.planted = null; B.dropped = null; B.prog = 0; B.progBy = -1; B.target = Math.random() < .5 ? 0 : 1; B.why = '';
+  G.bul = []; G.zones = []; G.mines = []; G.strikes = [];
+  for (const e of G.ents) {
+    if (!e.alive) { e.wpn = 'pistol'; e.armor = 0; e.kit = 0; e.nades = 0; }
+    if (e.team === B.atk) e.kit = 0;
+    e.alive = true; e.hp = e.maxhp; e.x = e.sx; e.y = e.sy; e.bursts = []; e.cd = 0; e.slow = e.shield = e.rage = 0; e.act = false; e.resp = 0;
+    setWeapon(e);
+  }
+  const atk = G.ents.filter(e => e.team === B.atk);
+  B.carrier = atk.length ? atk[Math.floor(Math.random() * atk.length)].id : -1;
+  for (const e of G.ents) if (e.ctrl === 'ai') botBuy(G, e);
+  G.time = BOMB.buy;
+  G.ev.push({ k: 'round', n: B.round, atk: B.atk });
+}
+function buy(G, e, item) {
+  const B = G.bomb;
+  if (!B || B.ph !== 'buy' || !e.alive) return false;
+  if (WEAPONS[item]) {
+    const W = WEAPONS[item];
+    if (e.wpn === item || e.money < W.price) return false;
+    e.money -= W.price; e.wpn = item; setWeapon(e); return true;
+  }
+  const g = GEAR[item]; if (!g || e.money < g.price) return false;
+  if (item === 'armor') { if (e.armor) return false; e.armor = 1; }
+  else if (item === 'kit') { if (e.kit || e.team === B.atk) return false; e.kit = 1; }
+  else if (item === 'nade') { if (e.nades >= 1) return false; e.nades = 1; }
+  e.money -= g.price; return true;
+}
+function botBuy(G, e) {
+  const def = e.team !== G.bomb.atk, m = e.money;
+  let w = 'pistol';
+  if (m >= 4250 + 650 && Math.random() < .25) w = 'sniper';
+  else if (m >= 2700) w = 'rifle';
+  else if (m >= 1500) w = Math.random() < .5 ? 'shotgun' : 'smg';
+  else if (m >= 1200 && Math.random() < .6) w = 'smg';
+  if (WEAPONS[e.wpn].price < WEAPONS[w].price) buy(G, e, w);
+  if (e.money >= 650) buy(G, e, 'armor');
+  if (def && e.money >= 400) buy(G, e, 'kit');
+  if (e.money >= 300 && Math.random() < .5) buy(G, e, 'nade');
+}
+function throwNade(G, e, a, d) {
+  const B = G.bomb;
+  if (!B || !e.alive || e.nades < 1 || B.ph === 'buy') return false;
+  e.nades--; fireSpec(G, e, NADE, a, d, true);
+  return true;
+}
+function bombOnKill(G, t, k) {
+  const B = G.bomb;
+  t.resp = 1e9; t.act = false;
+  if (k && k.team !== t.team) k.money = Math.min(ECON.max, k.money + ECON.kill);
+  if (B.carrier === t.id) { B.carrier = -1; B.dropped = { x: t.x, y: t.y }; G.ev.push({ k: 'msg', m: 'dropped' }); }
+}
+function roundEnd(G, win, why) {
+  const B = G.bomb;
+  if (B.ph === 'end') return;
+  B.ph = 'end'; B.pt = BOMB.end; B.wins[win]++; B.lastWin = win; B.why = why; B.prog = 0;
+  B.lossStreak[win] = 0; B.lossStreak[1 - win]++;
+  for (const e of G.ents) {
+    const pay = e.team === win ? ECON.win : Math.min(ECON.lossMax, ECON.loss + ECON.lossStep * (B.lossStreak[e.team] - 1));
+    e.money = Math.min(ECON.max, e.money + pay); e.act = false;
+  }
+  G.ev.push({ k: 'roundEnd', win, why, atk: B.atk });
+}
+function canPlant(G, e) {
+  const B = G.bomb;
+  if (!B || B.ph !== 'live' || !e.alive || B.carrier !== e.id) return -1;
+  const s = bombSites(G); for (let i = 0; i < s.length; i++) if (dist(e, s[i]) < BOMB.siteR) return i;
+  return -1;
+}
+function canDefuse(G, e) { const B = G.bomb; return !!(B && B.ph === 'planted' && e.alive && e.team !== B.atk && dist(e, B.planted) < 70); }
+function bombStep(G, dt) {
+  const B = G.bomb;
+  B.pt -= dt; G.time = Math.max(0, B.pt);
+  const alive = t => G.ents.some(e => e.alive && e.team === t), atk = B.atk, def = 1 - atk;
+  if (B.ph === 'buy') { if (B.pt <= 0) { B.ph = 'live'; B.pt = BOMB.round; G.ev.push({ k: 'msg', m: 'go' }); } return; }
+  if (B.ph === 'end') {
+    if (B.pt <= 0) { if (B.wins[0] >= BOMB.win || B.wins[1] >= BOMB.win) { G.over = true; G.result = B.wins.slice(); } else startRound(G); }
+    return;
+  }
+  if (B.ph === 'live') {
+    if (B.dropped) for (const e of G.ents) if (e.alive && e.team === atk && dist(e, B.dropped) < R + 30) { B.carrier = e.id; B.dropped = null; G.ev.push({ k: 'msg', m: 'picked', id: e.id }); break; }
+    const c = G.ents.find(e => e.id === B.carrier), site = c ? canPlant(G, c) : -1;
+    if (c && site >= 0 && c.act) {
+      if (B.progBy !== c.id) { B.prog = 0; B.progBy = c.id; }
+      B.prog += dt;
+      if (B.prog >= BOMB.plant) {
+        B.ph = 'planted'; B.pt = BOMB.timer; B.planted = { x: c.x, y: c.y, site }; B.carrier = -1; B.prog = 0; B.progBy = -1; c.act = false;
+        c.money = Math.min(ECON.max, c.money + ECON.plant);
+        G.ev.push({ k: 'msg', m: 'planted', site: bombSites(G)[site].name });
+      }
+    } else if (B.progBy >= 0) { B.prog = 0; B.progBy = -1; }
+    if (!alive(atk)) return roundEnd(G, def, 'elim');
+    if (!alive(def)) return roundEnd(G, atk, 'elim');
+    if (B.pt <= 0) return roundEnd(G, def, 'time');
+    return;
+  }
+  if (B.ph === 'planted') {
+    const d = G.ents.find(e => e.act && canDefuse(G, e));
+    if (d) {
+      if (B.progBy !== d.id) { B.prog = 0; B.progBy = d.id; }
+      B.prog += dt;
+      if (B.prog >= (d.kit ? BOMB.kitDefuse : BOMB.defuse)) return roundEnd(G, def, 'defused');
+    } else if (B.progBy >= 0) { B.prog = 0; B.progBy = -1; }
+    if (!alive(def)) return roundEnd(G, atk, 'elim');
+    if (B.pt <= 0) {
+      G.ev.push({ k: 'boom', x: Math.round(B.planted.x), y: Math.round(B.planted.y), r: BOMB.blast, v: 1 });
+      for (const e of G.ents) if (e.alive && dist(e, B.planted) < BOMB.blast) kill(G, e, null);
+      return roundEnd(G, atk, 'boom');
+    }
+  }
+}
+function bombNeed(G) { const B = G.bomb; if (B.ph === 'live') return BOMB.plant; const d = G.ents.find(e => e.id === B.progBy); return d && d.kit ? BOMB.kitDefuse : BOMB.defuse; }
+
+/* Path finding for bots: a breadth-first "flow field" on a 50 px grid. */
+const CELL = 50;
+function navGrid(G) {
+  if (G.nav) return G.nav;
+  const cw = Math.ceil(G.W / CELL), ch = Math.ceil(G.H / CELL), free = new Uint8Array(cw * ch), pad = R + 2;
+  for (let j = 0; j < ch; j++) for (let i = 0; i < cw; i++) {
+    const x = i * CELL + CELL / 2, y = j * CELL + CELL / 2;
+    let ok = x > R && y > R && x < G.W - R && y < G.H - R;
+    for (const w of G.walls) if (x > w.x - pad && x < w.x + w.w + pad && y > w.y - pad && y < w.y + w.h + pad) { ok = false; break; }
+    free[j * cw + i] = ok ? 1 : 0;
+  }
+  return (G.nav = { cw, ch, free, cache: new Map() });
+}
+function cellOf(N, x, y) { return clamp(Math.floor(y / CELL), 0, N.ch - 1) * N.cw + clamp(Math.floor(x / CELL), 0, N.cw - 1); }
+function nearestFree(N, c) {
+  if (N.free[c]) return c;
+  const cx = c % N.cw, cy = (c / N.cw) | 0;
+  for (let r = 1; r < 6; r++) for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+    const x = cx + dx, y = cy + dy; if (x < 0 || y < 0 || x >= N.cw || y >= N.ch) continue;
+    if (N.free[y * N.cw + x]) return y * N.cw + x;
+  }
+  return c;
+}
+function flowField(G, tx, ty) {
+  const N = navGrid(G), goal = nearestFree(N, cellOf(N, tx, ty));
+  if (N.cache.has(goal)) return N.cache.get(goal);
+  const D = new Int32Array(N.cw * N.ch).fill(1e9), q = [goal]; D[goal] = 0;
+  for (let h = 0; h < q.length; h++) {
+    const c = q[h], cx = c % N.cw, cy = (c / N.cw) | 0;
+    for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+      const x = cx + dx, y = cy + dy; if (x < 0 || y < 0 || x >= N.cw || y >= N.ch) continue;
+      const n = y * N.cw + x; if (!N.free[n] || D[n] <= D[c] + 1) continue;
+      D[n] = D[c] + 1; q.push(n);
+    }
+  }
+  N.cache.set(goal, D);
+  return D;
+}
+function pathDir(G, e, tx, ty) {
+  if (los(G, e, { x: tx, y: ty })) { const l = Math.hypot(tx - e.x, ty - e.y) || 1; return { x: (tx - e.x) / l, y: (ty - e.y) / l }; }
+  const N = navGrid(G), D = flowField(G, tx, ty), c = nearestFree(N, cellOf(N, e.x, e.y)), cx = c % N.cw, cy = (c / N.cw) | 0;
+  let best = c, bd = D[c];
+  for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]]) {
+    const x = cx + dx, y = cy + dy; if (x < 0 || y < 0 || x >= N.cw || y >= N.ch) continue;
+    const n = y * N.cw + x; if (!N.free[n]) continue;
+    if (dx && dy && (!N.free[cy * N.cw + x] || !N.free[y * N.cw + cx])) continue;
+    if (D[n] < bd) { bd = D[n]; best = n; }
+  }
+  const px = (best % N.cw) * CELL + CELL / 2, py = ((best / N.cw) | 0) * CELL + CELL / 2, l = Math.hypot(px - e.x, py - e.y) || 1;
+  return { x: (px - e.x) / l, y: (py - e.y) / l };
+}
+function aiBomb(G, e, dt) {
+  const B = G.bomb, a = e.ai;
+  e.act = false;
+  if (B.ph === 'buy') return;
+  const isAtk = e.team === B.atk, sites = bombSites(G), mates = G.ents.filter(o => o.team === e.team), idx = mates.indexOf(e);
+  let t = null, d = 1e9;
+  for (const o of G.ents) if (o.alive && o.team !== e.team) { const dd = dist(e, o); if (dd < d && (dd < e.atk.range * 1.15) && los(G, e, o)) { d = dd; t = o; } }
+  let goal = null, stop = 40;
+  if (B.ph === 'end') goal = null;
+  else if (isAtk) {
+    if (B.ph === 'live') {
+      if (B.carrier === e.id) { const s = sites[B.target]; if (dist(e, s) < BOMB.siteR * .55) { e.act = true; } else goal = s; }
+      else if (B.dropped) goal = B.dropped;
+      else { const c = G.ents.find(o => o.id === B.carrier); goal = c && idx % 2 ? c : sites[B.target]; stop = 110; }
+    } else if (B.ph === 'planted') { goal = B.planted; stop = 160; }
+  } else {
+    if (B.ph === 'live') {
+      const mid = { x: (sites[0].x + sites[1].x) / 2, y: sites[0].y + (sites[0].y < G.H / 2 ? 230 : -230) };
+      const spots = [mid, sites[0], sites[1]];
+      goal = mates.length === 1 ? mid : spots[(idx + B.round) % 3]; stop = 70;
+    }
+    else if (B.ph === 'planted') {
+      if (canDefuse(G, e) && (!t || d > 380 || e.skill < .35 || B.pt < 6)) e.act = true;
+      else goal = B.planted;
+      stop = 30;
+    }
+  }
+  let mx = 0, my = 0;
+  const urgent = e.act || (B.carrier === e.id) || (!isAtk && B.ph === 'planted' && B.pt < 5);
+  if (e.act) { /* stand still while planting or defusing */ }
+  else if (t && !urgent) {
+    a.st -= dt; if (a.st <= 0) { a.st = rand(.6, 1.6); a.strafe = Math.random() < .5 ? -1 : 1; }
+    const ta = Math.atan2(t.y - e.y, t.x - e.x), want = e.atk.range * .7;
+    const f = d > want + 40 ? 1 : d < want - 90 ? -1 : 0;
+    mx = Math.cos(ta) * f + Math.cos(ta + Math.PI / 2) * a.strafe * .7; my = Math.sin(ta) * f + Math.sin(ta + Math.PI / 2) * a.strafe * .7;
+  } else if (goal && dist(e, goal) > stop) { const p = pathDir(G, e, goal.x, goal.y); mx = p.x; my = p.y; }
+  const l = Math.hypot(mx, my); if (l > 0) { mx /= l; my /= l; }
+  const sp = speedOf(e);
+  e.x += mx * sp * dt; e.y += my * sp * dt; resolve(G, e);
+  if (l > 0) e.ang = Math.atan2(my, mx);
+  if (e.nades > 0 && t && d < 460 && d > 150 && Math.random() < dt * .6) throwNade(G, e, Math.atan2(t.y - e.y, t.x - e.x), d);
+  aiShoot(G, e, t, d, dt);
+}
+
 /* Rewards for one player after a match. */
 function rewards(res, kills, coinsHeld, map, wins, lvl) {
+  const bonus = map === 'bomb' && res === 'w' ? 30 : 0;
   let coins = res === 'w' ? 50 + kills * 8 + Math.min(60, wins * 2) : res === 'd' ? 25 + kills * 5 : 15 + kills * 5;
   if (map === 'coins') coins += coinsHeld * 3;
   if (map === 'rush' && res === 'w') coins += 20;
+  coins += bonus;
   const troph = lvl >= 30 ? (res === 'w' ? 10 : res === 'd' ? 2 : -4) : 0;
   return { coins, troph };
 }
@@ -537,7 +803,7 @@ function pickBot(wins) {
   return ROSTER[Math.floor(rand(lo, hi + 1))];
 }
 
-const SHARED = { ROSTER, FOK, MAPS, MAP_NAMES, RUSH_GOAL, R, mult, enemyLvl, enemySkill, isPro, rand, clamp, dist, monthsSince,
+const SHARED = { WEAPONS, WEAPON_KEYS, GEAR, ECON, BOMB, bombSites, buy, throwNade, canPlant, canDefuse, bombNeed, ROSTER, FOK, MAPS, MAP_NAMES, RUSH_GOAL, R, mult, enemyLvl, enemySkill, isPro, rand, clamp, dist, monthsSince,
   pickBot, createMatch, step, attack, useSuper, autoAim, superRange, resolve, pushResolve, rushPush, rushRows, nearestEnemy, scores, rewards, flags, speedOf };
 if (typeof module !== 'undefined' && module.exports) module.exports = SHARED; else root.SHARED = SHARED;
 })(typeof self !== 'undefined' ? self : this);
