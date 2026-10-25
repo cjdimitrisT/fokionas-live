@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('./mini-ws.js');
 const SH = require('./shared.js');
+const VERSION = 8;   // shown at the server address, so you can check which version is running
 
 let CFG = {};
 try { CFG = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8')); } catch (e) {}
@@ -46,7 +47,7 @@ async function readUser(nick, token) {
 /* ---------- connections ---------- */
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
-  res.end(`Fokionas Arena live server: OK\nConnected: ${clients.size} · Battles: ${rooms.size}\n`);
+  res.end(`Fokionas Arena live server: OK\nVersion: ${VERSION}\nConnected: ${clients.size} · Battles: ${rooms.size}\n`);
 });
 const wss = new WebSocketServer({ server, maxPayload: 4096 });
 const clients = new Set();
