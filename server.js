@@ -52,6 +52,7 @@ const wss = new WebSocketServer({ server, maxPayload: 4096 });
 const clients = new Set();
 const queues = { 1: [], 2: [], 3: [] };
 const rooms = new Set();
+const parties = new Map();   // friend invites: code -> { members, kind, mode }
 let nextId = 1;
 
 const send = (c, m) => { if (c.ws.readyState === 1) c.ws.send(JSON.stringify(m)); };
@@ -89,6 +90,19 @@ async function onMessage(c, m) {
       wins = st.wins || 0; c.pro = !!st.pro;
     }
     Object.assign(c, { mode, bid, lvl, wins, state: 'queue', joinedAt: Date.now() });
+    const party = typeof m.party === 'string' && /^[a-f0-9]{6,16}$/.test(m.party) ? m.party : null;
+    if (party) {   // playing with a friend: wait for them, not for strangers
+      let P = parties.get(party);
+      if (!P) { P = { members: [], kind: m.kind === 'vs' ? 'vs' : 'team', mode, t: Date.now() }; parties.set(party, P); }
+      c.party = party; P.members.push(c);
+      if (P.members.length >= 2) {
+        parties.delete(party);
+        const [a, b] = P.members, n = P.kind === 'team' ? Math.max(2, P.mode) : P.mode;
+        for (const x of P.members) x.party = null;
+        makeRoom(n, [a, b], P.kind === 'team' ? [0, 0] : [0, 1]);
+      } else send(c, { t: 'party', waiting: true });
+      return;
+    }
     queues[mode].push(c);
     return queueStatus();
   }
@@ -120,6 +134,7 @@ async function onMessage(c, m) {
 }
 
 function leave(c) {
+  if (c.party) { const P = parties.get(c.party); if (P) { P.members = P.members.filter(x => x !== c); if (!P.members.length) parties.delete(c.party); } c.party = null; }
   if (c.state === 'queue') { const q = queues[c.mode]; const i = q.indexOf(c); if (i >= 0) q.splice(i, 1); queueStatus(); }
   const r = c.room;
   if (r) {
@@ -147,15 +162,19 @@ setInterval(() => {
     while (q.length >= need) makeRoom(mode, q.splice(0, need));
     if (q.length && now - q[0].joinedAt > FILL_WAIT) makeRoom(mode, q.splice(0, q.length));
   }
+  for (const [code, P] of parties) if (now - P.t > 75000) {
+    parties.delete(code);
+    for (const x of P.members) { x.party = null; x.state = 'idle'; send(x, { t: 'error', msg: 'Your friend did not join in time. Invite them again.' }); }
+  }
   queueStatus();
 }, 1000);
 
 function broadcast(r, m) { for (const h of r.humans) send(h, m); }
 function voteList(r) { const v = {}; for (const k of Object.keys(SH.MAPS)) v[k] = []; for (const h of r.humans) { const x = r.votes.get(h.id); if (x) v[x].push(h.nick); } return v; }
 
-function makeRoom(mode, humans) {
+function makeRoom(mode, humans, teams) {
   const r = { mode, humans, phase: 'vote', votes: new Map(), G: null };
-  humans.forEach((h, i) => { h.state = 'room'; h.room = r; h.team = i % 2; });
+  humans.forEach((h, i) => { h.state = 'room'; h.room = r; h.team = teams ? teams[i] : i % 2; });
   rooms.add(r);
   broadcast(r, { t: 'room', mode, until: VOTE_TIME, players: humans.map(h => ({ nick: h.nick, pro: !!h.pro, team: h.team, bid: h.bid, lvl: h.lvl })) });
   for (const h of humans) send(h, { t: 'you', team: h.team });

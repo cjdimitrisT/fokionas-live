@@ -134,7 +134,7 @@ const COIN_WALLS = [{x:180,y:380,w:240,h:50},{x:980,y:380,w:240,h:50},{x:180,y:9
 const MAPS = {
   coins: { name: 'Cash Grab', W: 1400, H: 1400, time: 90, walls: COIN_WALLS, desc: 'Coins appear in the middle. The team holding the most coins at the end wins. Die and you drop them.' },
   open: { name: 'Open Arena', W: 1400, H: 1400, time: 120, walls: [], desc: 'Completely open, no walls. First team to reach the kill target wins.' },
-  ball: { name: 'Football', W: 1200, H: 1700, time: 180, walls: null, desc: 'A football pitch with two goals. Dribble the ball by walking into it, shoot to kick it. Most goals after 3 minutes wins. Twice the ball turns into a bomb: kick it and you die, score with it for 2 goals.' },
+  ball: { name: 'Football', W: 1200, H: 1700, time: 180, walls: null, desc: 'A football pitch with two goals. Dribble the ball by walking into it, shoot to kick it. Most goals after 3 minutes wins, or the first team to 10 goals with a lead of 2. Twice the ball turns into a bomb: kick it and you die, score with it for 2 goals.' },
   bomb: { name: 'Bomb Defuse', W: 1400, H: 1600, time: 60, walls: null, desc: 'Rounds like Counter-Strike. Buy weapons and armor, then one team plants the bomb at site A or B and the other defuses it. First to 4 rounds wins.' },
   rush: { name: 'Crusher Run', W: 1000, H: 2600, time: 120, walls: [], desc: 'Race to the other side! Moving walls push you, and if they squash you against the edge you start over. First to cross wins.' }
 };
@@ -562,8 +562,8 @@ const GEAR = {
   nade:  { name: 'Grenade',    price: 300, desc: 'One explosive you throw over walls.' }
 };
 const NADE = { k: 'lob', dmg: 1500, range: 480, boom: 130, r: 9, vis: 6 };
-const ECON = { start: 800, max: 16000, kill: 300, win: 3250, loss: 1900, lossStep: 500, lossMax: 3400, plant: 300 };
-const BOMB = { buy: 8, round: 60, timer: 30, plant: 3, defuse: 5, kitDefuse: 2.5, end: 4, win: 4, swap: 3, siteR: 110, blast: 380 };
+const ECON = { start: 2000, max: 16000, kill: 300, win: 3250, loss: 1900, lossStep: 500, lossMax: 3400, plant: 300 };
+const BOMB = { buy: 12, round: 60, timer: 30, plant: 3, defuse: 5, kitDefuse: 2.5, end: 4, win: 4, swap: 3, siteR: 110, blast: 380 };
 const BOMB_HALF = [{x:0,y:560,w:260,h:50},{x:1140,y:560,w:260,h:50},{x:470,y:250,w:50,h:230},{x:880,y:250,w:50,h:230},{x:620,y:420,w:160,h:50},{x:190,y:190,w:70,h:70},{x:1140,y:400,w:70,h:70},{x:330,y:720,w:180,h:50}];
 const BOMB_WALLS = BOMB_HALF.concat(BOMB_HALF.map(w => ({ x: 1400 - w.x - w.w, y: 1600 - w.y - w.h, w: w.w, h: w.h })), [{ x: 660, y: 700, w: 80, h: 200 }]);
 MAPS.bomb.walls = BOMB_WALLS;
@@ -797,7 +797,7 @@ function aiBomb(G, e, dt) {
 }
 
 /* ---------- FOOTBALL ---------- */
-const SOC = { GY: 90, mouth: 340, half: 90, full: 180, stopMax: 20, bombDur: 15, kick: 1100, ballR: 16, pause: 2.5 };
+const SOC = { winGoals: 10, GY: 90, mouth: 340, half: 90, full: 180, stopMax: 20, bombDur: 15, kick: 1100, ballR: 16, pause: 2.5 };
 function socWalls(W, H) {
   const l = (W - SOC.mouth) / 2, r = l + SOC.mouth, gy = SOC.GY;
   return [{ x: 0, y: 0, w: l, h: gy }, { x: r, y: 0, w: W - r, h: gy }, { x: 0, y: H - gy, w: l, h: gy }, { x: r, y: H - gy, w: W - r, h: gy }];
@@ -855,6 +855,9 @@ function socGoal(G, team) {
   G.ev.push({ k: 'goal', team, pts, by: by ? by.name : '', x: Math.round(b.x), y: Math.round(b.y) });
   if (b.bomb > 0) { b.bomb = 0; G.ev.push({ k: 'boom', x: Math.round(b.x), y: Math.round(b.y), r: 160, v: 1 }); }
   S.pause = SOC.pause; socReset(G);
+  // mercy rule: 10 goals with a lead of at least 2 ends the match
+  const g = S.goals, top = Math.max(g[0], g[1]);
+  if (top >= SOC.winGoals && Math.abs(g[0] - g[1]) >= 2) { G.over = true; G.result = g.slice(); G.ev.push({ k: 'msg', m: 'full' }); }
 }
 function socBall(G, dt) {
   const b = G.ball, S = G.soc, r = SOC.ballR;
