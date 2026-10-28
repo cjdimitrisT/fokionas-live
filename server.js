@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('./mini-ws.js');
 const SH = require('./shared.js');
-const VERSION = 8;   // shown at the server address, so you can check which version is running
+const VERSION = 9;   // shown at the server address, so you can check which version is running
 
 let CFG = {};
 try { CFG = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8')); } catch (e) {}
@@ -118,7 +118,7 @@ async function onMessage(c, m) {
   if (r.phase !== 'play') return;
   const G = r.G, e = G.ents.find(x => x.pid === c.id); if (!e) return;
   if (m.t === 'pos') {
-    if (!e.alive || G.start > 0 || !isFinite(m.x) || !isFinite(m.y) || (G.bomb && G.bomb.ph === 'buy') || (G.soc && G.soc.pause > 0)) return;
+    if (!e.alive || G.start > 0 || !isFinite(m.x) || !isFinite(m.y) || (G.bomb && G.bomb.ph === 'buy') || (G.soc && G.soc.pause > 0) || e.jump) return;
     const now = Date.now(), el = Math.min(.5, (now - (c.lastPos || now)) / 1000); c.lastPos = now;
     const allow = SH.speedOf(e) * el * 1.5 + 8 + (G.push.length ? 20 : 0), dx = m.x - e.x, dy = m.y - e.y, d = Math.hypot(dx, dy);
     const ox = e.x, oy = e.y;
@@ -129,6 +129,8 @@ async function onMessage(c, m) {
     if (isFinite(m.a)) e.ang = m.a;
   } else if (m.t === 'fire' && isFinite(m.a)) SH.attack(G, e, m.a, isFinite(m.d) ? m.d : null);
   else if (m.t === 'super') SH.useSuper(G, e, isFinite(m.a) ? m.a : e.ang, isFinite(m.d) ? m.d : null);
+  else if (m.t === 'jump' && G.hoop) SH.jumpStart(G, e);
+  else if (m.t === 'release' && G.hoop) SH.jumpRelease(G, e);
   else if (m.t === 'buy' && G.bomb) SH.buy(G, e, String(m.item));
   else if (m.t === 'act' && G.bomb) e.act = !!m.on;
   else if (m.t === 'nade' && G.bomb && isFinite(m.a)) SH.throwNade(G, e, m.a, isFinite(m.d) ? m.d : 320);
@@ -210,7 +212,7 @@ setInterval(() => {
   for (const r of rooms) {
     if (r.phase !== 'play') continue;
     const G = r.G, done = SH.step(G, TICK);
-    const ents = G.ents.map(e => [e.id, R1(e.x), R1(e.y), Math.round(e.ang * 100), R1(e.hp), e.alive ? 1 : 0, e.coins, e.kills, SH.flags(e), G.bomb ? SH.WEAPON_KEYS.indexOf(e.wpn) : -1, G.bomb ? (e.armor ? 1 : 0) | (e.kit ? 2 : 0) : 0]);
+    const ents = G.ents.map(e => [e.id, R1(e.x), R1(e.y), Math.round(e.ang * 100), R1(e.hp), e.alive ? 1 : 0, e.coins, e.kills, SH.flags(e), G.bomb ? SH.WEAPON_KEYS.indexOf(e.wpn) : -1, G.bomb ? (e.armor ? 1 : 0) | (e.kit ? 2 : 0) : 0, e.baskets || 0, R1(SH.jumpHeight(e)), e.jump ? Math.round(e.jump.t * 100) : null]);
     const bul = G.bul.map(b => [b.id, R1(b.x), R1(b.y), R1(b.vx), R1(b.vy), b.team, b.r, b.vis, R1(b.h || 0)]);
     const coins = G.coins.map(c => [c.id, R1(c.x), R1(c.y)]);
     const zones = G.zones.map(z => [R1(z.x), R1(z.y), z.r, z.vis]);
@@ -221,7 +223,8 @@ setInterval(() => {
       Math.round(B.prog * 100), Math.round(SH.bombNeed(G) * 10), B.progBy] : null;
     const ba = G.ball ? [R1(G.ball.x), R1(G.ball.y), R1(G.ball.vx), R1(G.ball.vy), G.ball.owner, Math.round(G.ball.bomb * 10)] : null;
     const so = G.soc ? [Math.round(G.soc.el * 10), G.soc.half, G.soc.stop > 0 ? 1 : 0, Math.round(G.soc.pause * 10)] : null;
-    const base = { t: 's', bo, ba, so, gt: Math.round(G.t * 1000) / 1000, time: Math.max(0, G.time), st: G.start, sc: SH.scores(G), e: ents, b: bul, c: coins, z: zones, m: mines, k: strikes, ev: G.ev };
+    const hb = G.hoop ? G.hoop.balls.map(b => [R1(b.x), R1(b.y), R1(b.h || 0), b.owner]) : null;
+    const base = { t: 's', bo, ba, so, hb, gt: Math.round(G.t * 1000) / 1000, time: Math.max(0, G.time), st: G.start, sc: SH.scores(G), e: ents, b: bul, c: coins, z: zones, m: mines, k: strikes, ev: G.ev };
     for (const h of r.humans) {
       const me = G.ents.find(e => e.pid === h.id);
       send(h, Object.assign({ me: me ? { sup: Math.round(me.sup * 100) / 100, resp: Math.min(99, Math.max(0, me.resp)), money: G.bomb ? me.money : null, nades: me.nades || 0 } : null }, base));

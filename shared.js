@@ -134,6 +134,7 @@ const COIN_WALLS = [{x:180,y:380,w:240,h:50},{x:980,y:380,w:240,h:50},{x:180,y:9
 const MAPS = {
   coins: { name: 'Cash Grab', W: 1400, H: 1400, time: 90, walls: COIN_WALLS, desc: 'Coins appear in the middle. The team holding the most coins at the end wins. Die and you drop them.' },
   open: { name: 'Open Arena', W: 1400, H: 1400, time: 120, walls: [], desc: 'Completely open, no walls. First team to reach the kill target wins.' },
+  hoop: { name: 'Basketball', W: 1200, H: 1300, time: 240, walls: [], desc: 'Knockout! One hoop, two balls. Grab a ball, hold the attack button to jump and let go at the top of the jump to shoot. The first player to make 10 baskets wins.' },
   ball: { name: 'Football', W: 1200, H: 1700, time: 180, walls: null, desc: 'A football pitch with two goals. Dribble the ball by walking into it, shoot to kick it. Most goals after 3 minutes wins, or the first team to 10 goals with a lead of 2. Twice the ball turns into a bomb: kick it and you die, score with it for 2 goals.' },
   bomb: { name: 'Bomb Defuse', W: 1400, H: 1600, time: 60, walls: null, desc: 'Rounds like Counter-Strike. Buy weapons and armor, then one team plants the bomb at site A or B and the other defuses it. First to 4 rounds wins.' },
   rush: { name: 'Crusher Run', W: 1000, H: 2600, time: 120, walls: [], desc: 'Race to the other side! Moving walls push you, and if they squash you against the edge you start over. First to cross wins.' }
@@ -181,6 +182,7 @@ function createMatch(n, map, members) {
   G.push = rushPush(map, W, H, 0, G.rows);
   if (map === 'bomb') bombInit(G);
   if (map === 'ball') socInit(G);
+  if (map === 'hoop') hoopInit(G);
   return G;
 }
 const flags = e => (e.slow > 0 ? 1 : 0) | (e.shield > 0 ? 2 : 0) | (e.rage > 0 ? 4 : 0);
@@ -229,6 +231,7 @@ function kill(G, t, k, crushed) {
   t.alive = false; t.hp = 0; t.resp = crushed ? 2 : 3; t.bursts = []; t.slow = t.shield = t.rage = 0;
   if (k) { k.kills++; G.kills[k.team]++; }
   if (G.bomb) bombOnKill(G, t, k);
+  if (G.hoop) hoopDrop(G, t);
   if (G.ball && G.ball.owner === t.id) { G.ball.owner = -1; G.ball.vx = G.ball.vy = 0; G.ball.cool = .3; }
   G.ev.push({ k: 'burst', x: Math.round(t.x), y: Math.round(t.y), c: t.b.color, n: 30 });
   G.ev.push({ k: crushed ? 'crush' : 'kill', by: k ? k.id : -1, of: t.id, x: Math.round(t.x), y: Math.round(t.y) });
@@ -328,6 +331,7 @@ function attack(G, e, a, d) {
   if (e.cd > 0 || !e.alive || G.start > 0 || G.over) return false;
   if (G.bomb && G.bomb.ph === 'buy') return false;
   if (G.soc && G.soc.pause > 0) return false;
+  if (G.hoop && hoopBall(G, e)) return false;   // with a basketball the button jumps and shoots instead
   if (G.ball && G.ball.owner === e.id) { e.cd = .35; e.ang = a; kickBall(G, e, a); return true; }
   e.cd = e.atk.reload; e.lastShot = G.t; e.ang = a;
   fireSpec(G, e, e.atk, a, d, false);
@@ -375,6 +379,7 @@ function onHit(G, b, o) {
 function aiUpdate(G, e, dt) {
   if (G.bomb) return aiBomb(G, e, dt);
   if (G.soc) return aiSoccer(G, e, dt);
+  if (G.hoop) return aiHoop(G, e, dt);
   const a = e.ai, t = nearestEnemy(G, e); let mx = 0, my = 0;
   const d = t ? dist(e, t) : 1e9, range = e.atk.range;
   let goal = null;
@@ -444,6 +449,7 @@ function aiShoot(G, e, t, d, dt) {
 function scores(G) {
   if (G.bomb) return G.bomb.wins.slice();
   if (G.soc) return G.soc.goals.slice();
+  if (G.hoop) { const s = [0, 0]; for (const e of G.ents) s[e.team] = Math.max(s[e.team], e.baskets || 0); return s; }
   if (G.map === 'open') return G.kills.slice();
   if (G.map === 'rush') {
     const s = [0, 0];
@@ -471,7 +477,7 @@ function step(G, dt) {
     e.slow = Math.max(0, e.slow - dt); e.shield = Math.max(0, e.shield - dt); e.rage = Math.max(0, e.rage - dt);
     for (let i = e.bursts.length - 1; i >= 0; i--) { const q = e.bursts[i]; q.t -= dt; if (q.t <= 0) { const A = Object.assign({}, q.A, { burst: null }); fireSpec(G, e, A, q.a, q.d, q.isSup); q.left--; q.t = q.A.burst.gap; if (q.left <= 0) e.bursts.splice(i, 1); } }
     if (e.ctrl === 'ai') { if (!frozen || G.bomb) aiUpdate(G, e, dt); }
-    else if (e.ctrl === 'input' && !frozen && !e.act) { const sp = speedOf(e); e.x += e.mx * sp * dt; e.y += e.my * sp * dt; resolve(G, e); }
+    else if (e.ctrl === 'input' && !frozen && !e.act && !e.jump) { const sp = speedOf(e); e.x += e.mx * sp * dt; e.y += e.my * sp * dt; resolve(G, e); }
     if (G.push.length && e.alive && pushResolve(G, e)) { kill(G, e, null, true); continue; }
     if (e.ctrl !== 'remote') { e._vx = (e.x - ox) / dt; e._vy = (e.y - oy) / dt; }
     if (!G.bomb && G.t - e.lastHit > 3 && G.t - e.lastShot > 2.5 && e.hp < e.maxhp) e.hp = Math.min(e.maxhp, e.hp + e.maxhp * .13 * dt);
@@ -540,6 +546,7 @@ function step(G, dt) {
     for (let i = G.coins.length - 1; i >= 0; i--) { const c = G.coins[i]; for (const e of G.ents) if (e.alive && Math.hypot(e.x - c.x, e.y - c.y) < R + 14) { e.coins++; G.coins.splice(i, 1); break; } }
   }
   if (G.soc) { socBall(G, dt); return !!G.over; }
+  if (G.hoop) { hoopStep(G, dt); if (G.over) return true; }
   if (G.bomb) return false;
   const sc = scores(G);
   if ((G.map === 'open' && (sc[0] >= G.target || sc[1] >= G.target)) || (G.map === 'rush' && G.winner >= 0) || G.time <= 0) { G.over = true; G.result = scores(G); return true; }
@@ -796,6 +803,136 @@ function aiBomb(G, e, dt) {
   aiShoot(G, e, t, d, dt);
 }
 
+/* ---------- BASKETBALL (KNOCKOUT) ---------- */
+const HOOP = { x: 600, y: 170, rim: 110, win: 10, jumpT: .9, peak: .45, ballR: 13, three: 470 };
+function hoopInit(G) {
+  const n = G.n;
+  for (const e of G.ents) {
+    const slot = G.ents.filter(o => o.team === e.team).indexOf(e);
+    e.sx = G.W / 2 + (e.team ? 1 : -1) * (130 + slot * 120); e.sy = G.H - 160; e.x = e.sx; e.y = e.sy; e.ang = -Math.PI / 2;
+    e.baskets = 0; e.jump = null;
+  }
+  G.hoop = { balls: [0, 1].map(i => ({ id: i, x: G.W / 2 + (i ? 120 : -120), y: G.H / 2 + 120, vx: 0, vy: 0, owner: -1, cool: 0, steal: 0, fly: null, h: 0 })), winner: -1 };
+  G.ev.push({ k: 'msg', m: 'tipoff' });
+}
+function hoopBall(G, e) { return G.hoop.balls.find(b => b.owner === e.id) || null; }
+function hoopDrop(G, e) {
+  const b = hoopBall(G, e); e.jump = null;
+  if (b) { b.owner = -1; b.vx = rand(-120, 120); b.vy = rand(-120, 120); b.cool = .3; }
+}
+/* Hold the button: jump. */
+function jumpStart(G, e) {
+  if (!G.hoop || !e.alive || e.jump || G.over) return false;
+  if (!hoopBall(G, e)) return false;
+  e.jump = { t: 0 }; e.ang = Math.atan2(HOOP.y - e.y, HOOP.x - e.x);
+  G.ev.push({ k: 'jump', id: e.id });
+  return true;
+}
+function jumpHeight(e) { if (!e.jump) return 0; const f = Math.min(1, e.jump.t / HOOP.jumpT); return Math.sin(Math.PI * f) * 46; }
+/* Chance to score: best when released at the top of the jump, from close range, without a defender in your face. */
+function shotChance(G, e) {
+  const d = Math.hypot(HOOP.x - e.x, HOOP.y - e.y), t = e.jump ? e.jump.t : 0;
+  const timing = clamp(1 - Math.abs(t - HOOP.peak) / HOOP.peak, 0, 1);
+  const base = d < 260 ? .8 : d < HOOP.three ? .65 : d < 700 ? .45 : .2;
+  let p = base * (.25 + .75 * timing);
+  for (const o of G.ents) if (o.alive && o.team !== e.team && dist(o, e) < 75) p *= .6;
+  return clamp(p, .02, .97);
+}
+/* Let go: shoot. */
+function jumpRelease(G, e) {
+  if (!G.hoop || !e.jump) return false;
+  const b = hoopBall(G, e); if (!b) { e.jump = null; return false; }
+  const p = shotChance(G, e), make = Math.random() < p, d = Math.hypot(HOOP.x - e.x, HOOP.y - e.y);
+  b.owner = -1; b.fly = { sx: e.x, sy: e.y, sh: 60 + jumpHeight(e), t: 0, T: .55 + d / 1500, make, shooter: e.id, top: 120 + d * .25 };
+  e.jump = null; e.lastShot = G.t;
+  G.ev.push({ k: 'shoot', id: e.id, p: Math.round(p * 100) });
+  return true;
+}
+function hoopStep(G, dt) {
+  const H = G.hoop;
+  for (const e of G.ents) if (e.jump) {
+    e.jump.t += dt;
+    if (e.jump.t >= HOOP.jumpT) { G.ev.push({ k: 'msg', m: 'travel', id: e.id }); hoopDrop(G, e); }   // held too long: you land and lose the ball
+  }
+  for (const b of H.balls) {
+    b.cool = Math.max(0, b.cool - dt); b.steal = Math.max(0, b.steal - dt);
+    if (b.fly) {
+      const f = b.fly; f.t += dt; const q = Math.min(1, f.t / f.T);
+      b.x = f.sx + (HOOP.x - f.sx) * q; b.y = f.sy + (HOOP.y - f.sy) * q;
+      b.h = f.sh + (HOOP.rim - f.sh) * q + Math.sin(Math.PI * q) * f.top;
+      if (q >= 1) {
+        const sh = G.ents.find(o => o.id === f.shooter);
+        if (f.make) {
+          if (sh) sh.baskets = (sh.baskets || 0) + 1;
+          G.ev.push({ k: 'basket', by: sh ? sh.name : '', id: f.shooter, team: sh ? sh.team : -1, n: sh ? sh.baskets : 0, x: HOOP.x, y: HOOP.y });
+          b.x = HOOP.x + rand(-20, 20); b.y = HOOP.y + 40; b.vx = rand(-80, 80); b.vy = rand(120, 220);
+          if (sh && sh.baskets >= HOOP.win) { H.winner = sh.team; G.over = true; G.result = scores(G); G.result[sh.team] = sh.baskets; }
+        } else {
+          G.ev.push({ k: 'rim', x: HOOP.x, y: HOOP.y });
+          const a = rand(.3, Math.PI - .3), sp = rand(260, 480); b.vx = Math.cos(a) * sp; b.vy = Math.sin(a) * sp;
+        }
+        b.fly = null; b.h = 0; b.cool = .25; b.lastShooter = f.shooter;
+      }
+      continue;
+    }
+    let o = b.owner >= 0 ? G.ents.find(x => x.id === b.owner) : null;
+    if (o && !o.alive) { b.owner = -1; o = null; }
+    if (o) {
+      const r = R + HOOP.ballR;
+      b.x = o.x + Math.cos(o.ang + .6) * r; b.y = o.y + Math.sin(o.ang + .6) * r; b.h = o.jump ? jumpHeight(o) + 50 : 28 + Math.abs(Math.sin(G.t * 9)) * 16;
+      if (!o.jump && b.steal <= 0) for (const e of G.ents) if (e.alive && e.team !== o.team && !hoopBall(G, e) && Math.hypot(e.x - b.x, e.y - b.y) < R + HOOP.ballR + 6) {
+        b.owner = e.id; b.steal = 1.2; G.ev.push({ k: 'msg', m: 'steal', id: e.id }); break;
+      }
+      continue;
+    }
+    // loose ball rolling
+    b.h = 0; b.x += b.vx * dt; b.y += b.vy * dt; const fr = Math.exp(-1.4 * dt); b.vx *= fr; b.vy *= fr;
+    const r = HOOP.ballR;
+    if (b.x < r) { b.x = r; b.vx = Math.abs(b.vx) * .7; } if (b.x > G.W - r) { b.x = G.W - r; b.vx = -Math.abs(b.vx) * .7; }
+    if (b.y < r) { b.y = r; b.vy = Math.abs(b.vy) * .7; } if (b.y > G.H - r) { b.y = G.H - r; b.vy = -Math.abs(b.vy) * .7; }
+    if (b.cool <= 0) {
+      let best = null, bd = R + r + 6;
+      for (const e of G.ents) { if (!e.alive || hoopBall(G, e)) continue; const d = Math.hypot(e.x - b.x, e.y - b.y); if (d < bd) { bd = d; best = e; } }
+      if (best) { b.owner = best.id; b.vx = b.vy = 0; b.steal = .8; }
+    }
+  }
+  if (G.time <= 0 && !G.over) { G.over = true; G.result = scores(G); }
+}
+function aiHoop(G, e, dt) {
+  const H = G.hoop, a = e.ai, mine = hoopBall(G, e);
+  if (e.jump) {   // release around the top of the jump; worse bots are worse at timing
+    a.rel = a.rel == null ? HOOP.peak + rand(-1, 1) * (1 - e.skill) * .35 : a.rel;
+    if (e.jump.t >= a.rel) { jumpRelease(G, e); a.rel = null; }
+    return;
+  }
+  let tx = e.x, ty = e.y, mayShoot = true;
+  if (mine) {
+    mayShoot = false;
+    a.spot = a.spot || { x: HOOP.x + rand(-260, 260), y: HOOP.y + rand(140, 330) };
+    const d = dist(e, HOOP), near = G.ents.some(o => o.alive && o.team !== e.team && dist(o, e) < 90);
+    if (dist(e, a.spot) < 40 || (d < 420 && !near && Math.random() < dt * 1.2) || (near && d < 520 && Math.random() < dt * 2)) { a.spot = null; jumpStart(G, e); return; }
+    tx = a.spot.x; ty = a.spot.y;
+  } else {
+    a.spot = null;
+    const loose = H.balls.filter(b => b.owner < 0 && !b.fly);
+    const carriers = H.balls.filter(b => b.owner >= 0).map(b => G.ents.find(o => o.id === b.owner)).filter(o => o && o.team !== e.team);
+    let target = null, bd = 1e9;
+    for (const b of loose) { const d = dist(e, b); if (d < bd) { bd = d; target = b; } }
+    for (const c of carriers) { const d = dist(e, c) * 1.3; if (d < bd) { bd = d; target = c; } }
+    if (!target) { const fl = H.balls.find(b => b.fly); target = fl ? { x: HOOP.x + rand(-60, 60), y: HOOP.y + 120 } : { x: HOOP.x, y: HOOP.y + 300 }; }
+    tx = target.x; ty = target.y;
+  }
+  let mx = tx - e.x, my = ty - e.y; const l = Math.hypot(mx, my);
+  if (l > 10) { mx /= l; my /= l; } else mx = my = 0;
+  const sp = speedOf(e); e.x += mx * sp * dt; e.y += my * sp * dt; resolve(G, e);
+  if (mx || my) e.ang = Math.atan2(my, mx);
+  if (mayShoot) {
+    const t = nearestEnemy(G, e, e.atk.range * 1.05), d = t ? dist(e, t) : 1e9;
+    aiShoot(G, e, t, d, dt);
+    if (mx || my) e.ang = Math.atan2(my, mx);
+  }
+}
+
 /* ---------- FOOTBALL ---------- */
 const SOC = { winGoals: 10, GY: 90, mouth: 340, half: 90, full: 180, stopMax: 20, bombDur: 15, kick: 1100, ballR: 16, pause: 2.5 };
 function socWalls(W, H) {
@@ -963,7 +1100,7 @@ function pickBot(wins) {
   return ROSTER[Math.floor(rand(lo, hi + 1))];
 }
 
-const SHARED = { SOC, socWalls, WEAPONS, WEAPON_KEYS, GEAR, ECON, BOMB, bombSites, buy, throwNade, canPlant, canDefuse, bombNeed, ROSTER, FOK, MAPS, MAP_NAMES, RUSH_GOAL, R, mult, enemyLvl, enemySkill, isPro, rand, clamp, dist, monthsSince,
+const SHARED = { HOOP, jumpStart, jumpRelease, jumpHeight, shotChance, hoopBall, SOC, socWalls, WEAPONS, WEAPON_KEYS, GEAR, ECON, BOMB, bombSites, buy, throwNade, canPlant, canDefuse, bombNeed, ROSTER, FOK, MAPS, MAP_NAMES, RUSH_GOAL, R, mult, enemyLvl, enemySkill, isPro, rand, clamp, dist, monthsSince,
   pickBot, createMatch, step, attack, useSuper, autoAim, superRange, resolve, pushResolve, rushPush, rushRows, nearestEnemy, scores, rewards, flags, speedOf };
 if (typeof module !== 'undefined' && module.exports) module.exports = SHARED; else root.SHARED = SHARED;
 })(typeof self !== 'undefined' ? self : this);
