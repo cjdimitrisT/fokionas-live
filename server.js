@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('./mini-ws.js');
 const SH = require('./shared.js');
-const VERSION = 9;   // shown at the server address, so you can check which version is running
+const VERSION = 10;   // shown at the server address, so you can check which version is running
 
 let CFG = {};
 try { CFG = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8')); } catch (e) {}

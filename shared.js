@@ -134,7 +134,7 @@ const COIN_WALLS = [{x:180,y:380,w:240,h:50},{x:980,y:380,w:240,h:50},{x:180,y:9
 const MAPS = {
   coins: { name: 'Cash Grab', W: 1400, H: 1400, time: 90, walls: COIN_WALLS, desc: 'Coins appear in the middle. The team holding the most coins at the end wins. Die and you drop them.' },
   open: { name: 'Open Arena', W: 1400, H: 1400, time: 120, walls: [], desc: 'Completely open, no walls. First team to reach the kill target wins.' },
-  hoop: { name: 'Basketball', W: 1200, H: 1300, time: 240, walls: [], desc: 'Knockout! One hoop, two balls. Grab a ball, hold the attack button to jump and let go at the top of the jump to shoot. The first player to make 10 baskets wins.' },
+  hoop: { name: 'Basketball', W: 1200, H: 1300, time: 240, walls: [], desc: 'Knockout! One hoop, two balls. Grab a ball, hold the attack button to jump and let go at the top of the jump to shoot. Shots from behind the three-point line count 2 points. The first player to 10 points wins.' },
   ball: { name: 'Football', W: 1200, H: 1700, time: 180, walls: null, desc: 'A football pitch with two goals. Dribble the ball by walking into it, shoot to kick it. Most goals after 3 minutes wins, or the first team to 10 goals with a lead of 2. Twice the ball turns into a bomb: kick it and you die, score with it for 2 goals.' },
   bomb: { name: 'Bomb Defuse', W: 1400, H: 1600, time: 60, walls: null, desc: 'Rounds like Counter-Strike. Buy weapons and armor, then one team plants the bomb at site A or B and the other defuses it. First to 4 rounds wins.' },
   rush: { name: 'Crusher Run', W: 1000, H: 2600, time: 120, walls: [], desc: 'Race to the other side! Moving walls push you, and if they squash you against the edge you start over. First to cross wins.' }
@@ -828,6 +828,8 @@ function jumpStart(G, e) {
   G.ev.push({ k: 'jump', id: e.id });
   return true;
 }
+/* Outside the three-point line a basket is worth 2 points. */
+function isThree(x, y) { return y <= HOOP.y ? Math.abs(x - HOOP.x) > HOOP.three : Math.hypot(x - HOOP.x, y - HOOP.y) > HOOP.three; }
 function jumpHeight(e) { if (!e.jump) return 0; const f = Math.min(1, e.jump.t / HOOP.jumpT); return Math.sin(Math.PI * f) * 46; }
 /* Chance to score: best when released at the top of the jump, from close range, without a defender in your face. */
 function shotChance(G, e) {
@@ -843,9 +845,9 @@ function jumpRelease(G, e) {
   if (!G.hoop || !e.jump) return false;
   const b = hoopBall(G, e); if (!b) { e.jump = null; return false; }
   const p = shotChance(G, e), make = Math.random() < p, d = Math.hypot(HOOP.x - e.x, HOOP.y - e.y);
-  b.owner = -1; b.fly = { sx: e.x, sy: e.y, sh: 60 + jumpHeight(e), t: 0, T: .55 + d / 1500, make, shooter: e.id, top: 120 + d * .25 };
+  b.owner = -1; b.fly = { sx: e.x, sy: e.y, sh: 60 + jumpHeight(e), t: 0, T: .55 + d / 1500, make, shooter: e.id, top: 120 + d * .25, pts: isThree(e.x, e.y) ? 2 : 1 };
   e.jump = null; e.lastShot = G.t;
-  G.ev.push({ k: 'shoot', id: e.id, p: Math.round(p * 100) });
+  G.ev.push({ k: 'shoot', id: e.id, p: Math.round(p * 100), three: b.fly.pts > 1 });
   return true;
 }
 function hoopStep(G, dt) {
@@ -863,8 +865,8 @@ function hoopStep(G, dt) {
       if (q >= 1) {
         const sh = G.ents.find(o => o.id === f.shooter);
         if (f.make) {
-          if (sh) sh.baskets = (sh.baskets || 0) + 1;
-          G.ev.push({ k: 'basket', by: sh ? sh.name : '', id: f.shooter, team: sh ? sh.team : -1, n: sh ? sh.baskets : 0, x: HOOP.x, y: HOOP.y });
+          if (sh) sh.baskets = (sh.baskets || 0) + f.pts;
+          G.ev.push({ k: 'basket', by: sh ? sh.name : '', id: f.shooter, team: sh ? sh.team : -1, n: sh ? sh.baskets : 0, pts: f.pts, x: HOOP.x, y: HOOP.y });
           b.x = HOOP.x + rand(-20, 20); b.y = HOOP.y + 40; b.vx = rand(-80, 80); b.vy = rand(120, 220);
           if (sh && sh.baskets >= HOOP.win) { H.winner = sh.team; G.over = true; G.result = scores(G); G.result[sh.team] = sh.baskets; }
         } else {
@@ -1100,7 +1102,7 @@ function pickBot(wins) {
   return ROSTER[Math.floor(rand(lo, hi + 1))];
 }
 
-const SHARED = { HOOP, jumpStart, jumpRelease, jumpHeight, shotChance, hoopBall, SOC, socWalls, WEAPONS, WEAPON_KEYS, GEAR, ECON, BOMB, bombSites, buy, throwNade, canPlant, canDefuse, bombNeed, ROSTER, FOK, MAPS, MAP_NAMES, RUSH_GOAL, R, mult, enemyLvl, enemySkill, isPro, rand, clamp, dist, monthsSince,
+const SHARED = { isThree, HOOP, jumpStart, jumpRelease, jumpHeight, shotChance, hoopBall, SOC, socWalls, WEAPONS, WEAPON_KEYS, GEAR, ECON, BOMB, bombSites, buy, throwNade, canPlant, canDefuse, bombNeed, ROSTER, FOK, MAPS, MAP_NAMES, RUSH_GOAL, R, mult, enemyLvl, enemySkill, isPro, rand, clamp, dist, monthsSince,
   pickBot, createMatch, step, attack, useSuper, autoAim, superRange, resolve, pushResolve, rushPush, rushRows, nearestEnemy, scores, rewards, flags, speedOf };
 if (typeof module !== 'undefined' && module.exports) module.exports = SHARED; else root.SHARED = SHARED;
 })(typeof self !== 'undefined' ? self : this);
