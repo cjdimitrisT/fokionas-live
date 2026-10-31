@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('./mini-ws.js');
 const SH = require('./shared.js');
-const VERSION = 10;   // shown at the server address, so you can check which version is running
+const VERSION = 11;   // shown at the server address, so you can check which version is running
 
 let CFG = {};
 try { CFG = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8')); } catch (e) {}
@@ -16,6 +16,7 @@ const API_URL = process.env.API_URL || CFG.apiUrl || 'https://www.fokionas.gr/ga
 const TICK = 1 / 20;            // 20 updates per second
 const FILL_WAIT = 20000;        // after 20 s of waiting, empty seats get bots
 const VOTE_TIME = 7000;
+const TOUR_KEY = process.env.TOUR_KEY || '';   // Render → Environment → TOUR_KEY (the same value as in api.php)
 
 /* ---------- accounts (reads the file written by api.php) ---------- */
 async function readUser(nick, token) {
@@ -54,6 +55,9 @@ const clients = new Set();
 const queues = { 1: [], 2: [], 3: [] };
 const rooms = new Set();
 const parties = new Map();   // friend invites: code -> { members, kind, mode }
+const clanGroups = new Map(); // clan practice: clan id -> { members, t }
+const CLAN_GATHER = 12000, CLAN_WAIT_FOE = 8000;
+let T = null;                 // the Sunday tournament while it runs
 let nextId = 1;
 
 const send = (c, m) => { if (c.ws.readyState === 1) c.ws.send(JSON.stringify(m)); };
@@ -90,6 +94,16 @@ async function onMessage(c, m) {
       lvl = Math.max(1, Math.min(30, (st.lvl && st.lvl[bid]) || 1));
       wins = st.wins || 0; c.pro = !!st.pro;
     }
+    const clanId = typeof m.clan === 'string' && /^[a-f0-9]{8}$/.test(m.clan) ? m.clan : null;
+    if (clanId) {   // clan practice: everyone available, all at level 30, no entry fee
+      bid = SH.ROSTER[+m.bid] ? +m.bid : 0;
+      Object.assign(c, { mode: 3, bid, lvl: 30, wins, state: 'queue', joinedAt: Date.now() });
+      let P = clanGroups.get(clanId);
+      if (!P) { P = { id: clanId, name: String(m.clanName || 'Clan').slice(0, 16), members: [], t: Date.now(), ready: 0 }; clanGroups.set(clanId, P); }
+      if (P.members.length < 3) P.members.push(c); c.clanGroup = clanId;
+      for (const x of P.members) send(x, { t: 'clan', count: P.members.length, wait: Math.max(0, Math.ceil((P.t + CLAN_GATHER - Date.now()) / 1000)) });
+      return;
+    }
     Object.assign(c, { mode, bid, lvl, wins, state: 'queue', joinedAt: Date.now() });
     const party = typeof m.party === 'string' && /^[a-f0-9]{6,16}$/.test(m.party) ? m.party : null;
     if (party) {   // playing with a friend: wait for them, not for strangers
@@ -107,6 +121,7 @@ async function onMessage(c, m) {
     queues[mode].push(c);
     return queueStatus();
   }
+  if (m.t === 'tour_hello') return tourHello(c, m);
   if (m.t === 'leave') return leave(c);
   const r = c.room; if (!r) return;
   if (m.t === 'vote' && r.phase === 'vote' && SH.MAP_NAMES[m.map]) {
@@ -137,6 +152,8 @@ async function onMessage(c, m) {
 }
 
 function leave(c) {
+  if (c.clanGroup) { const P = clanGroups.get(c.clanGroup); if (P) { P.members = P.members.filter(x => x !== c); if (!P.members.length) clanGroups.delete(c.clanGroup); } c.clanGroup = null; }
+  if (T) T.clients.delete(c);
   if (c.party) { const P = parties.get(c.party); if (P) { P.members = P.members.filter(x => x !== c); if (!P.members.length) parties.delete(c.party); } c.party = null; }
   if (c.state === 'queue') { const q = queues[c.mode]; const i = q.indexOf(c); if (i >= 0) q.splice(i, 1); queueStatus(); }
   const r = c.room;
@@ -144,10 +161,10 @@ function leave(c) {
     r.humans = r.humans.filter(h => h !== c);
     r.votes && r.votes.delete(c.id);
     if (r.G) { const e = r.G.ents.find(x => x.pid === c.id); if (e) { e.pid = null; e.ctrl = 'ai'; e.skill = .5; e.name += ' (bot)'; } }
-    if (!r.humans.length) { clearTimeout(r.voteTimer); rooms.delete(r); }
+    if (!r.humans.length && !r.tour) { clearTimeout(r.voteTimer); rooms.delete(r); }   // tournament games go on with bots
     else if (r.phase === 'vote') { broadcast(r, { t: 'votes', votes: voteList(r) }); if (r.votes.size === r.humans.length) endVote(r); }
   }
-  c.room = null; c.state = c.nick ? 'idle' : 'new';
+  c.room = null; c.state = c.nick ? 'idle' : 'new'; c.tourClan = null;
 }
 
 /* ---------- matchmaking ---------- */
@@ -169,14 +186,26 @@ setInterval(() => {
     parties.delete(code);
     for (const x of P.members) { x.party = null; x.state = 'idle'; send(x, { t: 'error', msg: 'Your friend did not join in time. Invite them again.' }); }
   }
+  // clan practice: gather the clan for a few seconds, then play another clan if one is ready, otherwise bots
+  const ready = [];
+  for (const P of clanGroups.values()) if (now - P.t > CLAN_GATHER && P.members.length) ready.push(P);
+  while (ready.length >= 2) {
+    const A = ready.shift(), B = ready.shift(); clanGroups.delete(A.id); clanGroups.delete(B.id);
+    for (const x of [...A.members, ...B.members]) x.clanGroup = null;
+    makeRoom(3, [...A.members, ...B.members], [...A.members.map(() => 0), ...B.members.map(() => 1)], { lvl30: true });
+  }
+  for (const P of ready) if (now - P.t > CLAN_GATHER + CLAN_WAIT_FOE) {
+    clanGroups.delete(P.id); for (const x of P.members) x.clanGroup = null;
+    makeRoom(3, P.members, P.members.map(() => 0), { lvl30: true });
+  } else for (const x of P.members) send(x, { t: 'clan', count: P.members.length, wait: 0, foe: true });
   queueStatus();
 }, 1000);
 
 function broadcast(r, m) { for (const h of r.humans) send(h, m); }
 function voteList(r) { const v = {}; for (const k of Object.keys(SH.MAPS)) v[k] = []; for (const h of r.humans) { const x = r.votes.get(h.id); if (x) v[x].push(h.nick); } return v; }
 
-function makeRoom(mode, humans, teams) {
-  const r = { mode, humans, phase: 'vote', votes: new Map(), G: null };
+function makeRoom(mode, humans, teams, opt) {
+  const r = { mode, humans, phase: 'vote', votes: new Map(), G: null, opt: opt || {} };
   humans.forEach((h, i) => { h.state = 'room'; h.room = r; h.team = teams ? teams[i] : i % 2; });
   rooms.add(r);
   broadcast(r, { t: 'room', mode, until: VOTE_TIME, players: humans.map(h => ({ nick: h.nick, pro: !!h.pro, team: h.team, bid: h.bid, lvl: h.lvl })) });
@@ -190,14 +219,18 @@ function endVote(r) {
   const cnt = {}; for (const k of Object.keys(SH.MAPS)) cnt[k] = 0; for (const v of r.votes.values()) cnt[v]++;
   const top = Math.max(...Object.values(cnt)), best = Object.keys(cnt).filter(k => cnt[k] === top);
   const map = best[Math.floor(Math.random() * best.length)], tie = best.length > 1;
-  const n = r.mode, avgW = r.humans.reduce((s, h) => s + h.wins, 0) / r.humans.length;
-  const members = r.humans.map(h => ({ bid: h.bid, lvl: h.lvl, team: h.team, ctrl: 'remote', nick: h.nick, pro: !!h.pro, pid: h.id }));
+  startGame(r, map, tie);
+}
+function startGame(r, map, tie) {
+  const n = r.mode, lvl30 = !!r.opt.lvl30, avgW = r.humans.length ? r.humans.reduce((s, h) => s + h.wins, 0) / r.humans.length : 10;
+  const members = r.humans.map(h => ({ bid: h.bid, lvl: lvl30 ? 30 : h.lvl, team: h.team, ctrl: 'remote', nick: h.nick, pro: !!h.pro, pid: h.id }));
   for (const team of [0, 1]) {
     let have = members.filter(m => m.team === team).length;
-    while (have++ < n) members.push({ bid: SH.pickBot(avgW).id, lvl: SH.enemyLvl(avgW), team, ctrl: 'ai', skill: SH.enemySkill(avgW) });
+    while (have++ < n) members.push(lvl30 ? { bid: Math.floor(Math.random() * 30), lvl: 30, team, ctrl: 'ai', skill: .65 }
+                                          : { bid: SH.pickBot(avgW).id, lvl: SH.enemyLvl(avgW), team, ctrl: 'ai', skill: SH.enemySkill(avgW) });
   }
   r.G = SH.createMatch(n, map, members);
-  if (process.env.FAST) r.G.time = +process.env.FAST;
+  if (process.env.FAST) r.G.time = +process.env.FAST;   // testing only: shorter games
   r.phase = 'play';
   for (const h of r.humans) {
     const me = r.G.ents.find(e => e.pid === h.id);
@@ -205,6 +238,128 @@ function endVote(r) {
       ents: r.G.ents.map(e => ({ id: e.id, bid: e.bid, lvl: e.lvl, team: e.team, name: e.name, pro: e.pro, human: e.ctrl === 'remote', maxhp: e.maxhp, x: e.x, y: e.y })) });
   }
 }
+
+/* ---------- SUNDAY TOURNAMENT ---------- */
+const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+// For testing only: TOUR_FAKE_START=<ms> makes the tournament start at that moment.
+const CHECKIN = +process.env.TOUR_CHECKIN || SH.TOUR.checkin;   // testing: shorter check-in
+const TOUR_MAPS = process.env.TOUR_MAPS ? process.env.TOUR_MAPS.split(',') : SH.TOUR.maps;
+const tourStartAt = now => process.env.TOUR_FAKE_START ? +process.env.TOUR_FAKE_START : SH.tourStart(now);
+let tourCache = { at: 0, data: null };
+async function tourData(force) {
+  if (!force && tourCache.data && Date.now() - tourCache.at < 15000) return tourCache.data;
+  try {
+    const r = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0 FokionasLive/1.0' }, body: JSON.stringify({ action: 'tour_get' }), signal: AbortSignal.timeout(8000) });
+    tourCache = { at: Date.now(), data: await r.json() };
+  } catch (e) { console.error('tour_get failed:', e.message); }
+  return tourCache.data;
+}
+function ensureTour() {
+  const now = Date.now(), st = tourStartAt(now);
+  if (T && (T.start !== st || now > st + SH.TOUR.window)) T = null;
+  if (!T && now >= st - 5 * 60e3 && now <= st + SH.TOUR.window) T = { start: st, phase: 'checkin', clients: new Set(), alive: [], rounds: [], byes: [], maps: shuffle(TOUR_MAPS.slice()), champion: null, prize: null, msg: '' };
+  return T;
+}
+async function tourHello(c, m) {
+  const t = ensureTour();
+  if (!t) return send(c, { t: 'tour', phase: 'closed', start: tourStartAt(Date.now()) });
+  const d = await tourData(true);
+  const cl = d && d.clans && d.clans.find(x => x.paid.some(n => n.toLowerCase() === c.nick.toLowerCase()));
+  if (!cl) return send(c, { t: 'tour', phase: 'notreg', start: t.start });
+  c.tourClan = cl.id; c.tourName = cl.name; c.bid = SH.ROSTER[+m.bid] ? +m.bid : 0; c.lvl = 30;
+  if (!c.room) c.state = 'tour';
+  t.clients.add(c);
+  tourBroadcast();
+}
+function tourPeople(id) { return [...T.clients].filter(c => c.tourClan === id && clients.has(c)); }
+function tourStatus(c) {
+  const rd = T.rounds.map(r => r.matches.map(x => ({ a: x.a.name, b: x.b.name, w: x.winner ? x.winner.name : null, map: r.map, score: x.score || null })));
+  const mine = c && c.tourClan, alive = T.alive.some(x => x.id === mine);
+  return { t: 'tour', phase: T.phase, start: T.start, checkinEnd: T.start + CHECKIN, nextAt: T.nextAt || null, round: T.rounds.length,
+    map: T.rounds.length ? T.rounds[T.rounds.length - 1].map : null, nextMap: T.maps[T.rounds.length % T.maps.length], rounds: rd,
+    byes: T.byes, champion: T.champion ? T.champion.name : null, prize: T.prize, msg: T.msg,
+    you: c ? { clan: c.tourName, alive, inMatch: !!c.room, here: tourPeople(mine).length } : null,
+    clans: T.phase === 'checkin' ? (tourCache.data && tourCache.data.clans || []).map(x => ({ name: x.name, here: tourPeople(x.id).length, paid: x.paid.length })) : null };
+}
+function tourBroadcast() { if (T) for (const c of T.clients) send(c, tourStatus(c)); }
+async function tourDraw() {
+  T.phase = 'drawing';
+  const d = await tourData(true);
+  T.tid = d && d.tid;
+  const present = ((d && d.clans) || []).filter(cl => tourPeople(cl.id).length > 0);
+  T.alive = shuffle(present.map(cl => ({ id: cl.id, name: cl.name })));
+  if (!T.alive.length) { T.phase = 'done'; T.msg = 'No clan was online at 19:00, so there is no tournament this week. Entry fees will be returned.'; return tourBroadcast(); }
+  if (T.alive.length === 1) return tourFinish(T.alive[0]);
+  startTourRound();
+}
+function startTourRound() {
+  const map = T.maps[T.rounds.length % T.maps.length], list = T.alive.slice(), matches = [];
+  let bye = null;
+  if (list.length % 2) bye = list.splice(Math.floor(Math.random() * list.length), 1)[0];
+  for (let i = 0; i < list.length; i += 2) matches.push({ a: list[i], b: list[i + 1], winner: null });
+  const round = { map, matches, bye };
+  T.rounds.push(round); T.byes.push(bye ? bye.name : null); T.phase = 'round'; T.msg = '';
+  for (const x of matches) startTourMatch(x, map);
+  tourBroadcast();
+}
+function decideWinner(G) {
+  const sc = G.result || SH.scores(G);
+  if (sc[0] !== sc[1]) return sc[0] > sc[1] ? 0 : 1;
+  const k = [0, 1].map(t => G.ents.filter(e => e.team === t).reduce((s, e) => s + e.kills, 0));   // draw: more kills goes through
+  if (k[0] !== k[1]) return k[0] > k[1] ? 0 : 1;
+  return Math.random() < .5 ? 0 : 1;
+}
+function startTourMatch(x, map) {
+  const A = tourPeople(x.a.id).filter(c => !c.room).slice(0, 3), B = tourPeople(x.b.id).filter(c => !c.room).slice(0, 3);
+  const done = G => {
+    const sc = G.result || SH.scores(G);
+    if (sc[0] === sc[1] && (x.replays || 0) < 3) {   // a draw: play one more game on another map
+      x.replays = (x.replays || 0) + 1; x.score = sc.join('–') + ' (draw)';
+      const other = (TOUR_MAPS.length > 1 ? TOUR_MAPS : SH.TOUR.maps).filter(k => k !== map), next = other[Math.floor(Math.random() * other.length)];
+      T.msg = `${x.a.name} and ${x.b.name} drew, so they play one more game: ${SH.MAP_NAMES[next]}.`;
+      tourBroadcast();
+      return setTimeout(() => startTourMatch(x, next), 6000);
+    }
+    const w = decideWinner(G); x.winner = w === 0 ? x.a : x.b; x.score = sc.join('–'); tourRoundCheck();
+  };
+  if (!A.length && !B.length) {   // nobody from either clan is connected: the bots play it out
+    const r = { mode: 3, humans: [], opt: { lvl30: true } }; startGame(r, map, false);
+    let s = 0; while (!SH.step(r.G, .05) && s < 20000) s++;
+    return setTimeout(() => done(r.G), 3000);
+  }
+  const humans = [...A, ...B], r = { mode: 3, humans, phase: 'vote', votes: new Map(), G: null, opt: { lvl30: true }, tour: x };
+  humans.forEach(h => { h.state = 'room'; h.room = r; h.team = A.includes(h) ? 0 : 1; send(h, { t: 'you', team: h.team }); });
+  rooms.add(r);
+  r.onEnd = done;
+  startGame(r, map, false);
+}
+function tourRoundCheck() {
+  const rd = T.rounds[T.rounds.length - 1];
+  if (!rd || rd.matches.some(x => !x.winner)) return tourBroadcast();
+  const next = []; for (const x of rd.matches) next.push(x.winner); if (rd.bye) next.push(rd.bye);
+  T.alive = next;
+  if (next.length === 1) return tourFinish(next[0]);
+  T.phase = 'break'; T.nextAt = Date.now() + 15000; tourBroadcast();
+}
+async function tourFinish(champ) {
+  T.phase = 'done'; T.champion = champ; T.msg = '';
+  tourBroadcast();
+  try {
+    const r = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0 FokionasLive/1.0' },
+      body: JSON.stringify({ action: 'tour_finish', key: TOUR_KEY, tid: T.tid, winner: champ.id, name: champ.name, bracket: T.rounds.map(r => r.matches.map(x => [x.a.name, x.b.name, x.winner && x.winner.name])) }), signal: AbortSignal.timeout(10000) });
+    const j = await r.json();
+    if (j.ok) T.prize = { each: j.each, pot: j.pot, players: j.winners };
+    else { console.error('tour_finish:', j.error); T.msg = 'The prize could not be paid automatically (' + (j.error || 'error') + '). Check TOUR_KEY on Render.'; }
+  } catch (e) { console.error('tour_finish failed:', e.message); T.msg = 'The prize could not be paid: the game site did not answer.'; }
+  tourBroadcast();
+}
+setInterval(() => {
+  const t = ensureTour(); if (!t) return;
+  const now = Date.now();
+  if (t.phase === 'checkin' && now >= t.start + CHECKIN) tourDraw();
+  else if (t.phase === 'break' && now >= t.nextAt) startTourRound();
+  else if (t.phase === 'checkin' && t.clients.size && now % 5000 < 2000) tourBroadcast();
+}, 2000);
 
 /* ---------- main loop ---------- */
 const R1 = v => Math.round(v);
@@ -232,8 +387,9 @@ setInterval(() => {
     G.ev = [];
     if (done) {
       broadcast(r, { t: 'end', sc: G.result, ents: G.ents.map(e => ({ id: e.id, kills: e.kills, coins: e.coins })) });
-      for (const h of r.humans) { h.room = null; h.state = 'idle'; }
+      for (const h of r.humans) { h.room = null; h.state = h.tourClan ? 'tour' : 'idle'; }
       rooms.delete(r);
+      if (r.onEnd) r.onEnd(G);
     }
   }
 }, TICK * 1000);

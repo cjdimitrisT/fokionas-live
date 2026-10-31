@@ -195,8 +195,16 @@ function resolve(G, e) {
   e.x = clamp(e.x, R, G.W - R); e.y = clamp(e.y, R, G.H - R);
   for (const w of G.walls) {
     const px = clamp(e.x, w.x, w.x + w.w), py = clamp(e.y, w.y, w.y + w.h), dx = e.x - px, dy = e.y - py, d = Math.hypot(dx, dy);
-    if (d < R) { if (d === 0) e.y = w.y - R; else { e.x += dx / d * (R - d); e.y += dy / d * (R - d); } }
+    if (d >= R) continue;
+    if (d > 0) { e.x += dx / d * (R - d); e.y += dy / d * (R - d); continue; }
+    // the centre ended up inside a wall (e.g. a corner next to the arena edge):
+    // leave by the closest side that stays inside the arena, so nobody gets stuck
+    const ways = [[w.x - R - e.x, 0], [w.x + w.w + R - e.x, 0], [0, w.y - R - e.y], [0, w.y + w.h + R - e.y]]
+      .filter(([mx, my]) => e.x + mx >= R && e.x + mx <= G.W - R && e.y + my >= R && e.y + my <= G.H - R)
+      .sort((p, q) => Math.abs(p[0] + p[1]) - Math.abs(q[0] + q[1]));
+    if (ways.length) { e.x += ways[0][0]; e.y += ways[0][1]; }
   }
+  e.x = clamp(e.x, R, G.W - R); e.y = clamp(e.y, R, G.H - R);
 }
 /* Moving walls push players sideways. Returns true if the player got squashed against the edge. */
 function pushResolve(G, e) {
@@ -1086,6 +1094,27 @@ function aiSoccer(G, e, dt) {
   }
 }
 
+/* ---------- SUNDAY TOURNAMENT ---------- */
+const TOUR = { fee: 50, troph: 10, clanMax: 3, hour: 19, checkin: 120e3, window: 3 * 3600e3, maps: ['coins', 'open', 'ball', 'bomb', 'rush', 'hoop'] };
+/* minutes that Greece (Europe/Athens) is ahead of UTC at a moment (2 in winter, 3 in summer) */
+function athensOffset(ms) {
+  try {
+    const p = {}; for (const x of new Intl.DateTimeFormat('en-US', { timeZone: 'Europe/Athens', hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(new Date(ms))) p[x.type] = x.value;
+    return Math.round((Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - Math.floor(ms / 1000) * 1000) / 60000);
+  } catch (e) { const m = new Date(ms).getUTCMonth(); return m >= 3 && m <= 9 ? 180 : 120; }
+}
+/* This week's tournament: Sunday 19:00 Greek time. It stays "this week's" until 3 hours after it starts. */
+function tourStart(now) {
+  now = now || Date.now();
+  const at = (ms) => { const off = athensOffset(ms), l = new Date(ms + off * 60000); return { off, y: l.getUTCFullYear(), m: l.getUTCMonth(), d: l.getUTCDate(), dow: l.getUTCDay() }; };
+  const mk = (y, m, d) => { let t = Date.UTC(y, m, d, TOUR.hour, 0, 0) - athensOffset(Date.UTC(y, m, d, 12)) * 60000; return t; };
+  const a = at(now);
+  let start = mk(a.y, a.m, a.d + ((7 - a.dow) % 7));
+  if (now > start + TOUR.window) { const b = at(start + 7 * 864e5); start = mk(b.y, b.m, b.d); }
+  return start;
+}
+function tourId(start) { const l = new Date(start + athensOffset(start) * 60000); return l.toISOString().slice(0, 10); }
+
 /* Rewards for one player after a match. */
 function rewards(res, kills, coinsHeld, map, wins, lvl) {
   const bonus = map === 'bomb' && res === 'w' ? 30 : 0;
@@ -1102,7 +1131,7 @@ function pickBot(wins) {
   return ROSTER[Math.floor(rand(lo, hi + 1))];
 }
 
-const SHARED = { isThree, HOOP, jumpStart, jumpRelease, jumpHeight, shotChance, hoopBall, SOC, socWalls, WEAPONS, WEAPON_KEYS, GEAR, ECON, BOMB, bombSites, buy, throwNade, canPlant, canDefuse, bombNeed, ROSTER, FOK, MAPS, MAP_NAMES, RUSH_GOAL, R, mult, enemyLvl, enemySkill, isPro, rand, clamp, dist, monthsSince,
+const SHARED = { TOUR, tourStart, tourId, athensOffset, isThree, HOOP, jumpStart, jumpRelease, jumpHeight, shotChance, hoopBall, SOC, socWalls, WEAPONS, WEAPON_KEYS, GEAR, ECON, BOMB, bombSites, buy, throwNade, canPlant, canDefuse, bombNeed, ROSTER, FOK, MAPS, MAP_NAMES, RUSH_GOAL, R, mult, enemyLvl, enemySkill, isPro, rand, clamp, dist, monthsSince,
   pickBot, createMatch, step, attack, useSuper, autoAim, superRange, resolve, pushResolve, rushPush, rushRows, nearestEnemy, scores, rewards, flags, speedOf };
 if (typeof module !== 'undefined' && module.exports) module.exports = SHARED; else root.SHARED = SHARED;
 })(typeof self !== 'undefined' ? self : this);
