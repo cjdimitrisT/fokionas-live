@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('./mini-ws.js');
 const SH = require('./shared.js');
-const VERSION = 11;   // shown at the server address, so you can check which version is running
+const VERSION = 12;   // shown at the server address, so you can check which version is running
 
 let CFG = {};
 try { CFG = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8')); } catch (e) {}
@@ -243,24 +243,35 @@ function startGame(r, map, tie) {
 const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
 // For testing only: TOUR_FAKE_START=<ms> makes the tournament start at that moment.
 const CHECKIN = +process.env.TOUR_CHECKIN || SH.TOUR.checkin;   // testing: shorter check-in
-const TOUR_MAPS = process.env.TOUR_MAPS ? process.env.TOUR_MAPS.split(',') : SH.TOUR.maps;
-const tourStartAt = now => process.env.TOUR_FAKE_START ? +process.env.TOUR_FAKE_START : SH.tourStart(now);
-let tourCache = { at: 0, data: null };
+const ENV_MAPS = process.env.TOUR_MAPS ? process.env.TOUR_MAPS.split(',') : null;   // testing overrides
+const ENV_PER = +process.env.TOUR_PER_MAP || 0;
+// maps and games per map come from the admin settings of the tournament (api.php), default: every map, 3 games each
+const tourMaps = () => ENV_MAPS || (T && T.mapList && T.mapList.length ? T.mapList : SH.TOUR.maps);
+const tourPer = () => ENV_PER || (T && T.perMap) || SH.TOUR.perMap;
+const fresh = () => tourCache.data && tourCache.data.start && Date.now() - tourCache.at < 120000 ? tourCache.data : null;
+const tourStartAt = now => process.env.TOUR_FAKE_START ? +process.env.TOUR_FAKE_START : fresh() ? fresh().start : SH.tourStart(now);
+let tourCache = { at: 0, data: null }, tourBusy = false;
 async function tourData(force) {
   if (!force && tourCache.data && Date.now() - tourCache.at < 15000) return tourCache.data;
   try {
     const r = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0 FokionasLive/1.0' }, body: JSON.stringify({ action: 'tour_get' }), signal: AbortSignal.timeout(8000) });
     tourCache = { at: Date.now(), data: await r.json() };
-  } catch (e) { console.error('tour_get failed:', e.message); }
+  } catch (e) { console.error('tour_get failed:', e.message); tourCache.at = Date.now() - 20000; }
   return tourCache.data;
 }
 function ensureTour() {
-  const now = Date.now(), st = tourStartAt(now);
-  if (T && (T.start !== st || now > st + SH.TOUR.window)) T = null;
-  if (!T && now >= st - 5 * 60e3 && now <= st + SH.TOUR.window) T = { start: st, phase: 'checkin', clients: new Set(), alive: [], rounds: [], byes: [], maps: shuffle(TOUR_MAPS.slice()), champion: null, prize: null, msg: '' };
+  const now = Date.now(), st = tourStartAt(now), d = fresh();
+  if (T && ((d && T.tid && d.tid !== T.tid && T.phase === 'checkin') || now > T.start + SH.TOUR.window)) T = null;
+  if (T && T.phase === 'checkin') {   // the admin can still move the start or change the maps during check-in
+    T.start = st;
+    if (d) { T.mapList = d.maps; T.perMap = d.perMap; T.name = d.name; }
+  }
+  if (!T && now >= st - 5 * 60e3 && now <= st + SH.TOUR.window)
+    T = { start: st, tid: d && d.tid, name: d && d.name, mapList: d && d.maps, perMap: d && d.perMap, phase: 'checkin', clients: new Set(), alive: [], rounds: [], byes: [], champion: null, prize: null, msg: '' };
   return T;
 }
 async function tourHello(c, m) {
+  await tourData();
   const t = ensureTour();
   if (!t) return send(c, { t: 'tour', phase: 'closed', start: tourStartAt(Date.now()) });
   const d = await tourData(true);
@@ -273,10 +284,11 @@ async function tourHello(c, m) {
 }
 function tourPeople(id) { return [...T.clients].filter(c => c.tourClan === id && clients.has(c)); }
 function tourStatus(c) {
-  const rd = T.rounds.map(r => r.matches.map(x => ({ a: x.a.name, b: x.b.name, w: x.winner ? x.winner.name : null, map: r.map, score: x.score || null })));
+  const rd = T.rounds.map(r => r.matches.map(x => ({ a: x.a.name, b: x.b.name, w: x.winner ? x.winner.name : null, map: x.plan[Math.min(x.gi, x.plan.length - 1)],
+    score: x.wins.join('–'), game: Math.min(x.gi + 1, x.plan.length), total: x.plan.length, maps: x.games.map(g => [g.map, g.w]) })));
   const mine = c && c.tourClan, alive = T.alive.some(x => x.id === mine);
   return { t: 'tour', phase: T.phase, start: T.start, checkinEnd: T.start + CHECKIN, nextAt: T.nextAt || null, round: T.rounds.length,
-    map: T.rounds.length ? T.rounds[T.rounds.length - 1].map : null, nextMap: T.maps[T.rounds.length % T.maps.length], rounds: rd,
+    name: T.name || 'Sunday Tournament', perMap: tourPer(), maps: tourMaps().length, rounds: rd,
     byes: T.byes, champion: T.champion ? T.champion.name : null, prize: T.prize, msg: T.msg,
     you: c ? { clan: c.tourName, alive, inMatch: !!c.room, here: tourPeople(mine).length } : null,
     clans: T.phase === 'checkin' ? (tourCache.data && tourCache.data.clans || []).map(x => ({ name: x.name, here: tourPeople(x.id).length, paid: x.paid.length })) : null };
@@ -284,22 +296,25 @@ function tourStatus(c) {
 function tourBroadcast() { if (T) for (const c of T.clients) send(c, tourStatus(c)); }
 async function tourDraw() {
   T.phase = 'drawing';
+  botClans = 0;
   const d = await tourData(true);
   T.tid = d && d.tid;
   const present = ((d && d.clans) || []).filter(cl => tourPeople(cl.id).length > 0);
   T.alive = shuffle(present.map(cl => ({ id: cl.id, name: cl.name })));
   if (!T.alive.length) { T.phase = 'done'; T.msg = 'No clan was online at 19:00, so there is no tournament this week. Entry fees will be returned.'; return tourBroadcast(); }
-  if (T.alive.length === 1) return tourFinish(T.alive[0]);
   startTourRound();
 }
+let botClans = 0;
+const botClan = () => ({ id: 'bots' + (++botClans), name: botClans > 1 ? 'Bot Clan ' + botClans : 'Bot Clan', bot: true });
 function startTourRound() {
-  const map = T.maps[T.rounds.length % T.maps.length], list = T.alive.slice(), matches = [];
-  let bye = null;
-  if (list.length % 2) bye = list.splice(Math.floor(Math.random() * list.length), 1)[0];
-  for (let i = 0; i < list.length; i += 2) matches.push({ a: list[i], b: list[i + 1], winner: null });
-  const round = { map, matches, bye };
-  T.rounds.push(round); T.byes.push(bye ? bye.name : null); T.phase = 'round'; T.msg = '';
-  for (const x of matches) startTourMatch(x, map);
+  const list = T.alive.slice(), matches = [];
+  if (list.length % 2) list.push(botClan());   // a clan left alone plays a clan full of bots
+  for (let i = 0; i < list.length; i += 2) {
+    const plan = []; for (const k of shuffle(tourMaps().slice())) for (let j = 0; j < tourPer(); j++) plan.push(k);   // every map, a few games each, random order
+    matches.push({ a: list[i], b: list[i + 1], winner: null, plan, gi: 0, wins: [0, 0], games: [], extra: 0 });
+  }
+  T.rounds.push({ matches }); T.byes.push(null); T.phase = 'round'; T.msg = '';
+  for (const x of matches) startTourMatch(x);
   tourBroadcast();
 }
 function decideWinner(G) {
@@ -309,51 +324,58 @@ function decideWinner(G) {
   if (k[0] !== k[1]) return k[0] > k[1] ? 0 : 1;
   return Math.random() < .5 ? 0 : 1;
 }
-function startTourMatch(x, map) {
+function startTourMatch(x) {
+  const map = x.plan[x.gi];
   const A = tourPeople(x.a.id).filter(c => !c.room).slice(0, 3), B = tourPeople(x.b.id).filter(c => !c.room).slice(0, 3);
   const done = G => {
-    const sc = G.result || SH.scores(G);
-    if (sc[0] === sc[1] && (x.replays || 0) < 3) {   // a draw: play one more game on another map
-      x.replays = (x.replays || 0) + 1; x.score = sc.join('–') + ' (draw)';
-      const other = (TOUR_MAPS.length > 1 ? TOUR_MAPS : SH.TOUR.maps).filter(k => k !== map), next = other[Math.floor(Math.random() * other.length)];
-      T.msg = `${x.a.name} and ${x.b.name} drew, so they play one more game: ${SH.MAP_NAMES[next]}.`;
-      tourBroadcast();
-      return setTimeout(() => startTourMatch(x, next), 6000);
+    const sc = G.result || SH.scores(G), w = sc[0] > sc[1] ? 0 : sc[1] > sc[0] ? 1 : -1;
+    x.games.push({ map, sc, w }); if (w >= 0) x.wins[w]++; x.gi++;
+    const gap = A.length || B.length ? 8000 : 300;
+    if (x.gi < x.plan.length) { tourBroadcast(); return setTimeout(() => startTourMatch(x), gap); }
+    if (x.wins[0] === x.wins[1] && x.extra < 3) {   // tied after every map: one more game on a random map
+      x.extra++; const ms = tourMaps(), next = ms[Math.floor(Math.random() * ms.length)]; x.plan.push(next);
+      T.msg = `${x.a.name} and ${x.b.name} are tied ${x.wins.join('–')}, so they play one more game: ${SH.MAP_NAMES[next]}.`;
+      tourBroadcast(); return setTimeout(() => startTourMatch(x), gap);
     }
-    const w = decideWinner(G); x.winner = w === 0 ? x.a : x.b; x.score = sc.join('–'); tourRoundCheck();
+    const win = x.wins[0] !== x.wins[1] ? (x.wins[0] > x.wins[1] ? 0 : 1) : decideWinner(G);
+    x.winner = win === 0 ? x.a : x.b; tourRoundCheck();
   };
   if (!A.length && !B.length) {   // nobody from either clan is connected: the bots play it out
     const r = { mode: 3, humans: [], opt: { lvl30: true } }; startGame(r, map, false);
     let s = 0; while (!SH.step(r.G, .05) && s < 20000) s++;
-    return setTimeout(() => done(r.G), 3000);
+    return setTimeout(() => done(r.G), 300);
   }
   const humans = [...A, ...B], r = { mode: 3, humans, phase: 'vote', votes: new Map(), G: null, opt: { lvl30: true }, tour: x };
   humans.forEach(h => { h.state = 'room'; h.room = r; h.team = A.includes(h) ? 0 : 1; send(h, { t: 'you', team: h.team }); });
   rooms.add(r);
   r.onEnd = done;
   startGame(r, map, false);
+  tourBroadcast();
 }
 function tourRoundCheck() {
   const rd = T.rounds[T.rounds.length - 1];
   if (!rd || rd.matches.some(x => !x.winner)) return tourBroadcast();
-  const next = []; for (const x of rd.matches) next.push(x.winner); if (rd.bye) next.push(rd.bye);
+  const next = rd.matches.map(x => x.winner);
   T.alive = next;
   if (next.length === 1) return tourFinish(next[0]);
   T.phase = 'break'; T.nextAt = Date.now() + 15000; tourBroadcast();
 }
 async function tourFinish(champ) {
-  T.phase = 'done'; T.champion = champ; T.msg = '';
+  T.phase = 'done'; T.champion = champ; T.msg = champ.bot ? 'The bots won, so every player gets the $50 entry fee back.' : '';
   tourBroadcast();
   try {
     const r = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0 FokionasLive/1.0' },
-      body: JSON.stringify({ action: 'tour_finish', key: TOUR_KEY, tid: T.tid, winner: champ.id, name: champ.name, bracket: T.rounds.map(r => r.matches.map(x => [x.a.name, x.b.name, x.winner && x.winner.name])) }), signal: AbortSignal.timeout(10000) });
+      body: JSON.stringify({ action: 'tour_finish', key: TOUR_KEY, tid: T.tid, winner: champ.bot ? 'bots' : champ.id, name: champ.name, bracket: T.rounds.map(r => r.matches.map(x => [x.a.name, x.b.name, x.winner && x.winner.name])) }), signal: AbortSignal.timeout(10000) });
     const j = await r.json();
-    if (j.ok) T.prize = { each: j.each, pot: j.pot, players: j.winners };
-    else { console.error('tour_finish:', j.error); T.msg = 'The prize could not be paid automatically (' + (j.error || 'error') + '). Check TOUR_KEY on Render.'; }
+    if (j.ok) {
+      T.prize = { each: j.each, pot: j.pot, players: j.winners };
+      if (j.bots && !champ.bot) T.msg = `${champ.name} played for free, so nobody wins money: every player gets the $50 entry fee back.`;
+    } else { console.error('tour_finish:', j.error); T.msg = 'The prize could not be paid automatically (' + (j.error || 'error') + '). Check TOUR_KEY on Render.'; }
   } catch (e) { console.error('tour_finish failed:', e.message); T.msg = 'The prize could not be paid: the game site did not answer.'; }
   tourBroadcast();
 }
 setInterval(() => {
+  if (Date.now() - tourCache.at > 30000 && !tourBusy) { tourBusy = true; tourData().finally(() => { tourBusy = false; }); }   // see admin changes (new start time, maps)
   const t = ensureTour(); if (!t) return;
   const now = Date.now();
   if (t.phase === 'checkin' && now >= t.start + CHECKIN) tourDraw();

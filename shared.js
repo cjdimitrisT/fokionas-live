@@ -106,20 +106,32 @@ const FOKIONAS = { n:'Fokionas', hp:11000, spd:222, look:'gold', hat:5, legend:t
   atk:{ name:'Golden Storm', desc:'Three golden bolts that chase and pierce enemies.', k:'shot', n:3, spread:.22, homing:2.5, pierce:1, dmg:950, range:500, reload:.42, bs:950, r:8, vis:3 },
   sup:{ name:'Fokionas Fury', desc:'28 golden bolts in every direction and heals 40%.', acts:[{ k:'shot', ring:1, n:28, pierce:1, dmg:1500, range:450, bs:800, r:10, vis:3 }, { k:'heal', frac:.4, rad:0 }] } };
 const MONTHLY = ['Zenon','Alkmini','Triton','Iris','Orfeas','Kassandra','Talos','Nefeli','Aiolos','Selini','Kirki','Achilleas','Pandora','Ikaros','Eos','Voreas','Kalypso','Perseas','Ariadni','Odysseas'];
+// special players, added after the first monthly player (their ids never change)
+const SPECIAL = [
+ { n:'Loukas', hp:4300, spd:195, look:'gun', face:'block', hat:-1, color:'#ffb238', pw:1.8, cost:2500,
+   atk:{ name:'Pixel Blaster', desc:'Two pixel bullets that bounce off walls twice.', k:'shot', n:2, spread:.14, bounce:2, dmg:560, range:470, reload:.55, bs:880, r:7, vis:8 },
+   sup:{ name:'Game Over', desc:'A shield, then 24 pixels burst out in every direction.', acts:[{ k:'shield', t:2.5, rad:0 }, { k:'shot', ring:1, n:24, pierce:1, dmg:700, range:420, bs:760, r:9, vis:8 }] } },
+ { n:'Alexandros', hp:5200, spd:185, look:'bomb', face:'fluff', hat:-1, color:'#5ad1c4', pw:1.8, cost:2500,
+   atk:{ name:'Fluff Bomb', desc:'A lobbed fluff ball that bursts into 5 smaller puffs.', k:'lob', dmg:650, range:460, boom:75, split:{ n:5, dmg:300, range:150 }, reload:1, r:12, vis:9 },
+   sup:{ name:'Big Hug', desc:'A giant fluffy squeeze: damages and slows everyone near, and heals him.', acts:[{ k:'nova', dmg:1800, rad:320, slow:2.5, vis:9 }, { k:'heal', frac:.35, rad:0 }] } }
+];
 const LAUNCH = { y: 2026, m: 9 }; // October 2026: 30 brawlers, then +1 every month
 const FOK = 29;
 
 function monthsSince(d) { d = d || new Date(); return Math.max(0, (d.getFullYear() - LAUNCH.y) * 12 + (d.getMonth() - LAUNCH.m)); }
+function addSpecial(out) { for (const b of SPECIAL) out.push(Object.assign({}, b, { id: out.length, isNew: true })); }
 function buildRoster() {
   const out = BR.map((b, i) => Object.assign({}, b, { id: i, pw: 1 + i * .035, color: `hsl(${(i * 47 + 10) % 360}, 72%, 56%)`, cost: i < 3 ? 0 : Math.round((80 + i * 55) / 10) * 10 }));
   out.push(Object.assign({ id: FOK }, FOKIONAS));
   const extra = monthsSince();
   for (let k = 0; k < extra; k++) {
+    if (k === 1) addSpecial(out);
     const A = BR[(k * 7 + 3) % BR.length], S = BR[(k * 11 + 5) % BR.length];
-    out.push({ id: 30 + k, n: MONTHLY[k % MONTHLY.length] + (k >= MONTHLY.length ? ' ' + (Math.floor(k / MONTHLY.length) + 1) : ''),
+    out.push({ id: out.length, n: MONTHLY[k % MONTHLY.length] + (k >= MONTHLY.length ? ' ' + (Math.floor(k / MONTHLY.length) + 1) : ''),
       hp: A.hp, spd: A.spd, look: A.look, hat: (k + 2) % 5, atk: A.atk, sup: S.sup, pw: 1.75 + (k % 5) * .04,
       color: `hsl(${(k * 67 + 200) % 360}, 70%, 58%)`, cost: 2500, isNew: k === extra - 1 });
   }
+  if (extra < 2) addSpecial(out);
   for (const b of out) b.name = b.n;
   return out;
 }
@@ -1095,7 +1107,7 @@ function aiSoccer(G, e, dt) {
 }
 
 /* ---------- SUNDAY TOURNAMENT ---------- */
-const TOUR = { fee: 50, troph: 10, clanMax: 3, hour: 19, checkin: 120e3, window: 3 * 3600e3, maps: ['coins', 'open', 'ball', 'bomb', 'rush', 'hoop'] };
+const TOUR = { fee: 50, troph: 10, clanMax: 3, hour: 19, checkin: 300e3, window: 6 * 3600e3, perMap: 3, maps: ['coins', 'open', 'ball', 'bomb', 'rush', 'hoop'] };
 /* minutes that Greece (Europe/Athens) is ahead of UTC at a moment (2 in winter, 3 in summer) */
 function athensOffset(ms) {
   try {
