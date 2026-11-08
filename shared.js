@@ -139,6 +139,10 @@ const ROSTER = buildRoster();
 const mult = l => 1 + (l - 1) * .06;
 const enemyLvl = wins => Math.min(30, 1 + Math.floor(wins / 2));
 const enemySkill = wins => Math.min(.95, .2 + wins * .025);
+// a W badge for every 500 trophies (500 = 1 W, 1000 = 2 W, …)
+const trophTotal = st => Object.values((st && st.troph) || {}).reduce((a, b) => a + (+b || 0), 0) + ((st && st.cup) || 0);
+const wCount = st => Math.floor(trophTotal(st) / 500);
+const wText = n => n > 0 ? (n <= 5 ? 'W'.repeat(n) : 'W×' + n) : '';
 const isPro = st => !!(st && (st.pro || ROSTER.every(b => ((st.lvl || {})[b.id] || 1) >= 30)));
 
 /* ---------- MAPS ---------- */
@@ -183,7 +187,7 @@ function createMatch(n, map, members) {
     const b = ROSTER[m.bid] || ROSTER[0], slot = slots[m.team]++, dm = mult(m.lvl) * b.pw;
     const sx = W / 2 + (slot - (n - 1) / 2) * 170, sy = map === 'rush' ? (m.team ? 90 : H - 90) : (m.team ? 150 : H - 150);
     ents.push({ id: i, pid: m.pid || null, b, bid: b.id, lvl: m.lvl, team: m.team, ctrl: m.ctrl, skill: m.skill || .5,
-      name: m.nick || b.name, pro: !!m.pro, human: m.ctrl !== 'ai',
+      name: m.nick || b.name, pro: !!m.pro, w: m.w || 0, human: m.ctrl !== 'ai',
       maxhp: Math.round(b.hp * dm), hp: Math.round(b.hp * dm), dm, spd: b.spd, range: b.atk.range, atk: b.atk,
       supNeed: 3600 * dm, x: sx, y: sy, sx, sy, ang: m.team ? Math.PI / 2 : -Math.PI / 2,
       cd: 0, alive: true, resp: 0, sup: 0, coins: 0, kills: 0, lastHit: -9, lastShot: -9,
@@ -630,7 +634,7 @@ function siegeDamage(G, which, dmg, own) {
   dmg = Math.round(dmg); S[which] = Math.max(0, S[which] - dmg);
   const c = sRect(which === 'gate' ? SIEGE.gate : SIEGE.crown);
   G.ev.push({ k: 'hit', x: c.x, y: c.y, v: dmg, id: -1, team: 1 - S.atk });
-  if (own) own.sup = Math.min(1, own.sup + dmg / own.supNeed * .5);
+  // hitting the gate or the Crown does NOT charge the super (only hitting players does)
   if (which === 'gate' && S.gate <= 0) {
     G.walls = siegeWalls(1 - S.atk, false);
     G.ev.push({ k: 'boom', x: c.x, y: c.y, r: 160, v: 1 }, { k: 'burst', x: c.x, y: c.y, c: '#8a5a2b', n: 40 }, { k: 'gate', team: S.atk });
@@ -1274,7 +1278,7 @@ function pickBot(wins) {
   return ROSTER[Math.floor(rand(lo, hi + 1))];
 }
 
-const SHARED = { TOUR, tourStart, tourId, athensOffset, isThree, HOOP, jumpStart, jumpRelease, jumpHeight, shotChance, hoopBall, SOC, socWalls, WEAPONS, WEAPON_KEYS, GEAR, ECON, BOMB, bombSites, buy, throwNade, canPlant, canDefuse, bombNeed, ROSTER, FOK, MAPS, MAP_NAMES, RUSH_GOAL, SIEGE, siegeWalls, R, mult, enemyLvl, enemySkill, isPro, rand, clamp, dist, monthsSince,
+const SHARED = { TOUR, tourStart, tourId, athensOffset, isThree, HOOP, jumpStart, jumpRelease, jumpHeight, shotChance, hoopBall, SOC, socWalls, WEAPONS, WEAPON_KEYS, GEAR, ECON, BOMB, bombSites, buy, throwNade, canPlant, canDefuse, bombNeed, ROSTER, FOK, MAPS, MAP_NAMES, RUSH_GOAL, SIEGE, siegeWalls, trophTotal, wCount, wText, R, mult, enemyLvl, enemySkill, isPro, rand, clamp, dist, monthsSince,
   pickBot, createMatch, step, attack, useSuper, autoAim, superRange, resolve, pushResolve, rushPush, rushRows, nearestEnemy, scores, rewards, flags, speedOf };
 if (typeof module !== 'undefined' && module.exports) module.exports = SHARED; else root.SHARED = SHARED;
 })(typeof self !== 'undefined' ? self : this);

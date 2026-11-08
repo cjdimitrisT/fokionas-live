@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('./mini-ws.js');
 const SH = require('./shared.js');
-const VERSION = 13;   // shown at the server address, so you can check which version is running
+const VERSION = 14;   // shown at the server address, so you can check which version is running
 
 let CFG = {};
 try { CFG = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8')); } catch (e) {}
@@ -79,7 +79,7 @@ async function onMessage(c, m) {
     if (c.checking) return; c.checking = true;
     const u = await readUser(m.nick, m.token); c.checking = false;
     if (!u.ok) { send(c, { t: 'error', msg: u.err || 'Your session expired. Log out and log in again.' }); return c.ws.close(); }
-    c.nick = u.nick; c.token = m.token; c.ustate = u.state; c.pro = !!(u.state && u.state.pro); c.state = 'idle';
+    c.nick = u.nick; c.token = m.token; c.ustate = u.state; c.pro = !!(u.state && u.state.pro); c.w = SH.wCount(u.state); c.state = 'idle';
     return send(c, { t: 'welcome', nick: c.nick, online: clients.size });
   }
   if (!c.nick) return;
@@ -92,7 +92,7 @@ async function onMessage(c, m) {
       const st = c.ustate, owned = st.all || (st.owned && st.owned[bid]) || bid < 3;
       if (!owned || !SH.ROSTER[bid]) bid = 0;
       lvl = Math.max(1, Math.min(30, (st.lvl && st.lvl[bid]) || 1));
-      wins = st.wins || 0; c.pro = !!st.pro;
+      wins = st.wins || 0; c.pro = !!st.pro; c.w = SH.wCount(st);
     }
     const clanId = typeof m.clan === 'string' && /^[a-f0-9]{8}$/.test(m.clan) ? m.clan : null;
     if (clanId) {   // clan practice: everyone available, all at level 30, no entry fee
@@ -208,7 +208,7 @@ function makeRoom(mode, humans, teams, opt) {
   const r = { mode, humans, phase: 'vote', votes: new Map(), G: null, opt: opt || {} };
   humans.forEach((h, i) => { h.state = 'room'; h.room = r; h.team = teams ? teams[i] : i % 2; });
   rooms.add(r);
-  broadcast(r, { t: 'room', mode, until: VOTE_TIME, players: humans.map(h => ({ nick: h.nick, pro: !!h.pro, team: h.team, bid: h.bid, lvl: h.lvl })) });
+  broadcast(r, { t: 'room', mode, until: VOTE_TIME, players: humans.map(h => ({ nick: h.nick, pro: !!h.pro, w: h.w || 0, team: h.team, bid: h.bid, lvl: h.lvl })) });
   for (const h of humans) send(h, { t: 'you', team: h.team });
   r.voteTimer = setTimeout(() => endVote(r), VOTE_TIME);
 }
@@ -223,7 +223,7 @@ function endVote(r) {
 }
 function startGame(r, map, tie) {
   const n = r.mode, lvl30 = !!r.opt.lvl30, avgW = r.humans.length ? r.humans.reduce((s, h) => s + h.wins, 0) / r.humans.length : 10;
-  const members = r.humans.map(h => ({ bid: h.bid, lvl: lvl30 ? 30 : h.lvl, team: h.team, ctrl: 'remote', nick: h.nick, pro: !!h.pro, pid: h.id }));
+  const members = r.humans.map(h => ({ bid: h.bid, lvl: lvl30 ? 30 : h.lvl, team: h.team, ctrl: 'remote', nick: h.nick, pro: !!h.pro, w: h.w || 0, pid: h.id }));
   for (const team of [0, 1]) {
     let have = members.filter(m => m.team === team).length;
     while (have++ < n) members.push(lvl30 ? { bid: Math.floor(Math.random() * 30), lvl: 30, team, ctrl: 'ai', skill: .65 }
@@ -235,7 +235,7 @@ function startGame(r, map, tie) {
   for (const h of r.humans) {
     const me = r.G.ents.find(e => e.pid === h.id);
     send(h, { t: 'start', n, map, tie, votes: voteList(r), you: me.id,
-      ents: r.G.ents.map(e => ({ id: e.id, bid: e.bid, lvl: e.lvl, team: e.team, name: e.name, pro: e.pro, human: e.ctrl === 'remote', maxhp: e.maxhp, x: e.x, y: e.y })) });
+      ents: r.G.ents.map(e => ({ id: e.id, bid: e.bid, lvl: e.lvl, team: e.team, name: e.name, pro: e.pro, w: e.w || 0, human: e.ctrl === 'remote', maxhp: e.maxhp, x: e.x, y: e.y })) });
   }
 }
 
