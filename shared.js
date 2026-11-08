@@ -149,7 +149,8 @@ const MAPS = {
   hoop: { name: 'Basketball', W: 1200, H: 1300, time: 240, walls: [], desc: 'Knockout! One hoop, two balls. Grab a ball, hold the attack button to jump and let go at the top of the jump to shoot. Shots from behind the three-point line count 2 points. The first player to 10 points wins.' },
   ball: { name: 'Football', W: 1200, H: 1700, time: 180, walls: null, desc: 'A football pitch with two goals. Dribble the ball by walking into it, shoot to kick it. Most goals after 3 minutes wins, or the first team to 10 goals with a lead of 2. Twice the ball turns into a bomb: kick it and you die, score with it for 2 goals.' },
   bomb: { name: 'Bomb Defuse', W: 1400, H: 1600, time: 60, walls: null, desc: 'Rounds like Counter-Strike. Buy weapons and armor, then one team plants the bomb at site A or B and the other defuses it. First to 4 rounds wins.' },
-  rush: { name: 'Crusher Run', W: 1000, H: 2600, time: 120, walls: [], desc: 'Race to the other side! Moving walls push you, and if they squash you against the edge you start over. First to cross wins.' }
+  rush: { name: 'Crusher Run', W: 1000, H: 2600, time: 120, walls: [], desc: 'Race to the other side! Moving walls push you, and if they squash you against the edge you start over. First to cross wins.' },
+  siege: { name: 'Castle Siege', W: 1400, H: 1800, time: 90, walls: null, desc: 'One team defends the castle, the other attacks it. Smash the gate, then destroy the Crown inside. Then the teams swap. Destroy more (or faster) to win. Defenders can walk through their own gate.' }
 };
 const MAP_NAMES = Object.fromEntries(Object.entries(MAPS).map(([k, m]) => [k, m.name]));
 const RUSH_GOAL = 110;
@@ -195,17 +196,20 @@ function createMatch(n, map, members) {
   if (map === 'bomb') bombInit(G);
   if (map === 'ball') socInit(G);
   if (map === 'hoop') hoopInit(G);
+  if (map === 'siege') siegeInit(G);
   return G;
 }
 const flags = e => (e.slow > 0 ? 1 : 0) | (e.shield > 0 ? 2 : 0) | (e.rage > 0 ? 4 : 0);
 const speedOf = e => e.spd * (e.slow > 0 ? .6 : 1) * (e.dribble ? .82 : 1);
 
 function inRect(w, x, y) { return x > w.x && x < w.x + w.w && y > w.y && y < w.y + w.h; }
-function hitWall(G, x, y) { for (const w of G.walls) if (inRect(w, x, y)) return true; for (const w of G.push) if (inRect(w, x, y)) return true; return false; }
-function los(G, a, b) { const d = dist(a, b), n = Math.ceil(d / 20); for (let i = 1; i < n; i++) { const t = i / n; if (hitWall(G, a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)) return false; } return true; }
+function hitWall(G, x, y, team) { for (const w of G.walls) if (w.pass !== team && inRect(w, x, y)) return true; for (const w of G.push) if (inRect(w, x, y)) return true; return false; }
+function wallAt(G, x, y, team) { for (const w of G.walls) if (w.pass !== team && inRect(w, x, y)) return w; return null; }
+function los(G, a, b) { const d = dist(a, b), n = Math.ceil(d / 20); for (let i = 1; i < n; i++) { const t = i / n; if (hitWall(G, a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.team)) return false; } return true; }
 function resolve(G, e) {
   e.x = clamp(e.x, R, G.W - R); e.y = clamp(e.y, R, G.H - R);
   for (const w of G.walls) {
+    if (w.pass === e.team) continue;   // defenders walk through their own castle gate
     const px = clamp(e.x, w.x, w.x + w.w), py = clamp(e.y, w.y, w.y + w.h), dx = e.x - px, dy = e.y - py, d = Math.hypot(dx, dy);
     if (d >= R) continue;
     if (d > 0) { e.x += dx / d * (R - d); e.y += dy / d * (R - d); continue; }
@@ -260,6 +264,7 @@ function kill(G, t, k, crushed) {
 }
 function explode(G, x, y, rad, dmg, team, own, noCharge, slow, vis) {
   for (const o of enemiesOf(G, team)) if (Math.hypot(o.x - x, o.y - y) < rad + R * .6) { if (slow) o.slow = Math.max(o.slow, slow); hurt(G, o, dmg, own, noCharge); }
+  if (G.siege) siegeBlast(G, x, y, rad, dmg, team, own);
   G.ev.push({ k: 'boom', x: Math.round(x), y: Math.round(y), r: rad, v: vis || 0 });
 }
 function aimPoint(G, e, a, d, range) {
@@ -290,7 +295,7 @@ function spawnShots(G, e, A, a, dmg, isSup) {
 function beam(G, e, a, A, dmg, isSup) {
   const cos = Math.cos(a), sin = Math.sin(a);
   let len = A.range;
-  if (!A.thru) for (let s = R; s < A.range; s += 10) { const x = e.x + cos * s, y = e.y + sin * s; if (x < 0 || y < 0 || x > G.W || y > G.H || hitWall(G, x, y)) { len = s; break; } }
+  if (!A.thru) for (let s = R; s < A.range; s += 10) { const x = e.x + cos * s, y = e.y + sin * s; if (x < 0 || y < 0 || x > G.W || y > G.H || hitWall(G, x, y, e.team)) { len = s; if (G.siege) siegeHitAt(G, x, y, dmg, e.team, e); break; } }
   const hits = [];
   for (const o of enemiesOf(G, e.team)) {
     const dx = o.x - e.x, dy = o.y - e.y, t = dx * cos + dy * sin, p = Math.abs(-dx * sin + dy * cos);
@@ -317,6 +322,7 @@ function fireSpec(G, e, A, a, d, isSup) {
       let da = Math.atan2(dy, dx) - a; da = Math.atan2(Math.sin(da), Math.cos(da));
       if (dd < A.range + R && (Math.abs(da) < A.arc || dd < R * 1.6)) hurt(G, o, dmg, e, isSup);
     }
+    if (G.siege) siegeHitAt(G, e.x + Math.cos(a) * (A.range + R * .5), e.y + Math.sin(a) * (A.range + R * .5), dmg, e.team, e, R);
     G.ev.push({ k: 'swing', x: Math.round(e.x), y: Math.round(e.y), a: Math.round(a * 100) / 100, r: A.range, arc: A.arc });
     if (A.slam) explode(G, e.x + Math.cos(a) * A.range * .75, e.y + Math.sin(a) * A.range * .75, A.slam, Math.round(dmg * .5), e.team, e, isSup, 0, 0);
     break; }
@@ -400,6 +406,7 @@ function aiUpdate(G, e, dt) {
   if (G.bomb) return aiBomb(G, e, dt);
   if (G.soc) return aiSoccer(G, e, dt);
   if (G.hoop) return aiHoop(G, e, dt);
+  if (G.siege) return aiSiege(G, e, dt);
   const a = e.ai, t = nearestEnemy(G, e); let mx = 0, my = 0;
   const d = t ? dist(e, t) : 1e9, range = e.atk.range;
   let goal = null;
@@ -469,6 +476,7 @@ function aiShoot(G, e, t, d, dt) {
 function scores(G) {
   if (G.bomb) return G.bomb.wins.slice();
   if (G.soc) return G.soc.goals.slice();
+  if (G.siege) return siegeScores(G);
   if (G.hoop) { const s = [0, 0]; for (const e of G.ents) s[e.team] = Math.max(s[e.team], e.baskets || 0); return s; }
   if (G.map === 'open') return G.kills.slice();
   if (G.map === 'rush') {
@@ -525,11 +533,12 @@ function step(G, dt) {
     let dead = false;
     if (!b.boomer) { b.life -= dt; if (b.life <= 0) dead = true; }
     const out = b.x < 0 || b.y < 0 || b.x > G.W || b.y > G.H;
-    if (!dead && (out || hitWall(G, b.x, b.y))) {
+    if (!dead && (out || hitWall(G, b.x, b.y, b.team))) {
+      if (G.siege && !out) siegeHitAt(G, b.x, b.y, b.dmg, b.team, b.own);
       if (b.boomer) { if (!b.back) { b.back = 1; b.hit.clear(); } b.x = ox; b.y = oy; }
       else if (b.bounce > 0) {
         b.bounce--;
-        const hx = out ? (b.x < 0 || b.x > G.W) : hitWall(G, b.x, oy), hy = out ? (b.y < 0 || b.y > G.H) : hitWall(G, ox, b.y);
+        const hx = out ? (b.x < 0 || b.x > G.W) : hitWall(G, b.x, oy, b.team), hy = out ? (b.y < 0 || b.y > G.H) : hitWall(G, ox, b.y, b.team);
         if (hx || !hy) b.vx = -b.vx; if (hy || !hx) b.vy = -b.vy;
         b.x = ox; b.y = oy; G.ev.push({ k: 'wall', x: Math.round(b.x), y: Math.round(b.y) });
       } else { dead = true; G.ev.push({ k: 'wall', x: Math.round(b.x), y: Math.round(b.y) }); }
@@ -568,11 +577,133 @@ function step(G, dt) {
   if (G.soc) { socBall(G, dt); return !!G.over; }
   if (G.hoop) { hoopStep(G, dt); if (G.over) return true; }
   if (G.bomb) return false;
+  if (G.siege) return siegeStep(G);
   const sc = scores(G);
   if ((G.map === 'open' && (sc[0] >= G.target || sc[1] >= G.target)) || (G.map === 'rush' && G.winner >= 0) || G.time <= 0) { G.over = true; G.result = scores(G); return true; }
   return false;
 }
 
+
+/* ---------- CASTLE SIEGE ---------- */
+// The castle is at the top. The attackers start at the bottom, smash the gate, then the Crown.
+// After the first half the teams swap. Points: gate 30 + crown 70 (by damage); a destroyed Crown = 100 + seconds left.
+const SIEGE = { half: 90, swap: 4, gateHp: 14000, crownHp: 24000, defY: 440, crown: { x: 665, y: 225, w: 70, h: 70 }, gate: { x: 620, y: 650, w: 160, h: 50 } };
+const SIEGE_WALLS = [
+  { x: 250, y: 0, w: 50, h: 700 }, { x: 1100, y: 0, w: 50, h: 700 },              // side walls
+  { x: 250, y: 650, w: 370, h: 50 }, { x: 780, y: 650, w: 370, h: 50 },            // front wall (gate in the middle)
+  { x: 220, y: 620, w: 110, h: 110 }, { x: 1070, y: 620, w: 110, h: 110 },         // towers
+  { x: 560, y: 610, w: 60, h: 120 }, { x: 780, y: 610, w: 60, h: 120 },            // gate towers
+  { x: 420, y: 290, w: 60, h: 60 }, { x: 920, y: 290, w: 60, h: 60 }, { x: 430, y: 500, w: 110, h: 40 }, { x: 860, y: 500, w: 110, h: 40 },   // inside
+  { x: 330, y: 960, w: 150, h: 55 }, { x: 920, y: 960, w: 150, h: 55 }, { x: 130, y: 1220, w: 60, h: 170 }, { x: 1210, y: 1220, w: 60, h: 170 },
+  { x: 380, y: 1360, w: 120, h: 50 }, { x: 900, y: 1360, w: 120, h: 50 }, { x: 640, y: 1130, w: 120, h: 40 }
+];
+MAPS.siege.walls = SIEGE_WALLS;
+function siegeWalls(def, gateUp) {
+  const w = SIEGE_WALLS.slice();
+  if (gateUp) w.push(Object.assign({ gate: 1, pass: def }, SIEGE.gate));
+  w.push(Object.assign({ crown: 1 }, SIEGE.crown));
+  return w;
+}
+function siegeInit(G) {
+  const avg = G.ents.reduce((s, e) => s + e.dm, 0) / Math.max(1, G.ents.length), per = G.n;   // tougher castle for bigger / stronger teams
+  G.siege = { atk: 0, half: 1, pts: [0, 0], gateMax: Math.round(SIEGE.gateHp * per * avg), crownMax: Math.round(SIEGE.crownHp * per * avg) };
+  siegeReset(G);
+}
+function siegeReset(G) {
+  const S = G.siege; S.gate = S.gateMax; S.crown = S.crownMax;
+  G.walls = siegeWalls(1 - S.atk, true);
+  G.time = SIEGE.half; G.bul = []; G.zones = []; G.mines = []; G.strikes = [];
+  const slots = [0, 0];
+  for (const e of G.ents) {
+    const atk = e.team === S.atk, slot = slots[e.team]++;
+    e.sx = G.W / 2 + (slot - (G.n - 1) / 2) * 170; e.sy = atk ? G.H - 110 : SIEGE.defY;
+    e.x = e.sx; e.y = e.sy; e.alive = true; e.hp = e.maxhp; e.resp = 0; e.bursts = [];
+    e.ang = atk ? -Math.PI / 2 : Math.PI / 2;
+  }
+}
+const sRect = w => ({ x: w.x + w.w / 2, y: w.y + w.h / 2 });
+function rectDist(w, x, y) { return Math.hypot(x - clamp(x, w.x, w.x + w.w), y - clamp(y, w.y, w.y + w.h)); }
+function siegeDamage(G, which, dmg, own) {
+  const S = G.siege;
+  if (which === 'crown' && S.gate > 0) { G.ev.push({ k: 'shieldhit', x: SIEGE.crown.x + 35, y: SIEGE.crown.y + 35 }); return; }   // the Crown is protected while the gate stands
+  if (S[which] <= 0) return;
+  dmg = Math.round(dmg); S[which] = Math.max(0, S[which] - dmg);
+  const c = sRect(which === 'gate' ? SIEGE.gate : SIEGE.crown);
+  G.ev.push({ k: 'hit', x: c.x, y: c.y, v: dmg, id: -1, team: 1 - S.atk });
+  if (own) own.sup = Math.min(1, own.sup + dmg / own.supNeed * .5);
+  if (which === 'gate' && S.gate <= 0) {
+    G.walls = siegeWalls(1 - S.atk, false);
+    G.ev.push({ k: 'boom', x: c.x, y: c.y, r: 160, v: 1 }, { k: 'burst', x: c.x, y: c.y, c: '#8a5a2b', n: 40 }, { k: 'gate', team: S.atk });
+  }
+  if (which === 'crown' && S.crown <= 0) G.ev.push({ k: 'boom', x: c.x, y: c.y, r: 220, v: 1 }, { k: 'burst', x: c.x, y: c.y, c: '#ffd23c', n: 60 });
+}
+function siegeHitAt(G, x, y, dmg, team, own, pad) {
+  const S = G.siege; if (team !== S.atk) return;
+  pad = pad || 4;
+  if (S.gate > 0 && rectDist(SIEGE.gate, x, y) < pad) siegeDamage(G, 'gate', dmg, own);
+  else if (rectDist(SIEGE.crown, x, y) < pad) siegeDamage(G, 'crown', dmg, own);
+}
+function siegeBlast(G, x, y, rad, dmg, team, own) {
+  const S = G.siege; if (team !== S.atk) return;
+  if (S.gate > 0 && rectDist(SIEGE.gate, x, y) < rad) siegeDamage(G, 'gate', dmg, own);
+  if (rectDist(SIEGE.crown, x, y) < rad) siegeDamage(G, 'crown', dmg, own);
+}
+function siegeLive(G) {
+  const S = G.siege;
+  if (S.crown <= 0) return 100 + Math.ceil(Math.max(0, G.time));
+  return Math.round(30 * (1 - S.gate / S.gateMax) + 70 * (1 - S.crown / S.crownMax));
+}
+function siegeScores(G) { const S = G.siege, s = S.pts.slice(); if (!S.doneHalf) s[S.atk] = siegeLive(G); return s; }
+function siegeStep(G) {
+  const S = G.siege;
+  if (S.crown > 0 && G.time > 0) return false;
+  S.pts[S.atk] = siegeLive(G);
+  G.ev.push({ k: 'siegehalf', team: S.atk, pts: S.pts[S.atk], half: S.half });
+  if (S.half >= 2) { S.doneHalf = true; G.over = true; G.result = S.pts.slice(); return true; }
+  S.half = 2; S.atk = 1 - S.atk; siegeReset(G); G.start = SIEGE.swap;   // swap sides, short pause
+  return false;
+}
+function aiSiege(G, e, dt) {
+  const S = G.siege, a = e.ai, atk = e.team === S.atk, t = nearestEnemy(G, e), d = t ? dist(e, t) : 1e9, range = e.atk.range;
+  const inside = e.y < 650;
+  const tw = S.gate > 0 ? SIEGE.gate : SIEGE.crown, tp = sRect(tw), ds = rectDist(tw, e.x, e.y);
+  let mx = 0, my = 0, goal = null, shootAt = null;
+  a.st -= dt; if (a.st <= 0) { a.st = rand(.8, 2); a.strafe = Math.random() < .5 ? -1 : 1; }
+  const fight = t && d < range * .9 && los(G, e, t);
+  if (atk) {
+    if (fight && !(ds < range * .8 && d > range * .55)) goal = null;   // an enemy is close: fight it
+    else {
+      // walk to the gate (through the middle), then to the Crown
+      goal = S.gate <= 0 && !inside && Math.abs(e.x - 700) > 55 ? { x: 700, y: 760 } : tp;
+      const want = e.atk.k === 'punch' || range < 260 ? R + 10 : Math.min(range * .7, 330);
+      if (ds < want && (e.atk.k === 'lob' || los(G, e, tp) || ds < R + 20)) { goal = null; shootAt = tp; }
+    }
+  } else {
+    const home = { x: 700 + (e.id % 3 - 1) * 140, y: S.gate > 0 ? 580 : 420 };
+    const threat = t && (dist(t, { x: 700, y: 400 }) < 620 || d < range);
+    if (!threat) goal = dist(e, home) > 40 ? home : null;
+  }
+  if (goal) { const ga = Math.atan2(goal.y - e.y, goal.x - e.x); mx = Math.cos(ga); my = Math.sin(ga); }
+  else if (shootAt) { const ta = Math.atan2(shootAt.y - e.y, shootAt.x - e.x); mx = Math.cos(ta + Math.PI / 2) * a.strafe * .35; my = Math.sin(ta + Math.PI / 2) * a.strafe * .35; }
+  else if (t) {
+    const melee = e.atk.k === 'punch' || range < 280, ta = Math.atan2(t.y - e.y, t.x - e.x), want = melee ? range * .5 : range * .72, see = los(G, e, t) || e.atk.k === 'lob';
+    let f = 0; if (!see || d > want + 40) f = 1; else if (d < want - 80) f = -1;
+    if (melee && d > want) { mx = Math.cos(ta); my = Math.sin(ta); }
+    else { mx = Math.cos(ta) * f + Math.cos(ta + Math.PI / 2) * a.strafe * .7; my = Math.sin(ta) * f + Math.sin(ta + Math.PI / 2) * a.strafe * .7; }
+  }
+  if (a.unstick > 0) { a.unstick -= dt; mx = a.ux; my = a.uy; }
+  const l = Math.hypot(mx, my); if (l > 0) { mx /= l; my /= l; }
+  const sp = speedOf(e);
+  e.x += mx * sp * dt; e.y += my * sp * dt; resolve(G, e);
+  if (l > .5 && Math.hypot(e.x - a.px, e.y - a.py) < sp * dt * .3) { const r = rand(0, 6.283); a.unstick = .5; a.ux = Math.cos(r); a.uy = Math.sin(r); }
+  a.px = e.x; a.py = e.y;
+  if (l > 0) e.ang = Math.atan2(my, mx);
+  if (shootAt && !(t && d < range * .6 && los(G, e, t))) {
+    a.react -= dt; e.ang = Math.atan2(shootAt.y - e.y, shootAt.x - e.x);
+    if (a.react <= 0 && e.cd <= 0 && attack(G, e, e.ang + rand(-1, 1) * (1 - e.skill) * .15, Math.hypot(shootAt.x - e.x, shootAt.y - e.y))) a.react = rand(0, (1 - e.skill) * .5);
+    if (e.sup >= 1 && !e.b.sup.acts.some(x => x.k === 'heal' || x.k === 'shield')) useSuper(G, e, e.ang, Math.hypot(shootAt.x - e.x, shootAt.y - e.y));
+  } else aiShoot(G, e, t, d, dt);
+}
 
 /* ---------- BOMB DEFUSE ---------- */
 const WEAPONS = {
@@ -1107,7 +1238,7 @@ function aiSoccer(G, e, dt) {
 }
 
 /* ---------- SUNDAY TOURNAMENT ---------- */
-const TOUR = { fee: 50, troph: 10, clanMax: 3, hour: 19, checkin: 300e3, window: 6 * 3600e3, perMap: 3, maps: ['coins', 'open', 'ball', 'bomb', 'rush', 'hoop'] };
+const TOUR = { fee: 50, troph: 10, clanMax: 3, hour: 19, checkin: 300e3, window: 6 * 3600e3, perMap: 1, maps: ['coins', 'open', 'ball', 'bomb', 'rush', 'hoop', 'siege'] };
 /* minutes that Greece (Europe/Athens) is ahead of UTC at a moment (2 in winter, 3 in summer) */
 function athensOffset(ms) {
   try {
@@ -1132,7 +1263,7 @@ function rewards(res, kills, coinsHeld, map, wins, lvl) {
   const bonus = map === 'bomb' && res === 'w' ? 30 : 0;
   let coins = res === 'w' ? 50 + kills * 8 + Math.min(60, wins * 2) : res === 'd' ? 25 + kills * 5 : 15 + kills * 5;
   if (map === 'coins') coins += coinsHeld * 3;
-  if (map === 'rush' && res === 'w') coins += 20;
+  if ((map === 'rush' || map === 'siege') && res === 'w') coins += 20;
   coins += bonus;
   const troph = lvl >= 30 ? (res === 'w' ? 10 : res === 'd' ? 2 : -4) : 0;
   return { coins, troph };
@@ -1143,7 +1274,7 @@ function pickBot(wins) {
   return ROSTER[Math.floor(rand(lo, hi + 1))];
 }
 
-const SHARED = { TOUR, tourStart, tourId, athensOffset, isThree, HOOP, jumpStart, jumpRelease, jumpHeight, shotChance, hoopBall, SOC, socWalls, WEAPONS, WEAPON_KEYS, GEAR, ECON, BOMB, bombSites, buy, throwNade, canPlant, canDefuse, bombNeed, ROSTER, FOK, MAPS, MAP_NAMES, RUSH_GOAL, R, mult, enemyLvl, enemySkill, isPro, rand, clamp, dist, monthsSince,
+const SHARED = { TOUR, tourStart, tourId, athensOffset, isThree, HOOP, jumpStart, jumpRelease, jumpHeight, shotChance, hoopBall, SOC, socWalls, WEAPONS, WEAPON_KEYS, GEAR, ECON, BOMB, bombSites, buy, throwNade, canPlant, canDefuse, bombNeed, ROSTER, FOK, MAPS, MAP_NAMES, RUSH_GOAL, SIEGE, siegeWalls, R, mult, enemyLvl, enemySkill, isPro, rand, clamp, dist, monthsSince,
   pickBot, createMatch, step, attack, useSuper, autoAim, superRange, resolve, pushResolve, rushPush, rushRows, nearestEnemy, scores, rewards, flags, speedOf };
 if (typeof module !== 'undefined' && module.exports) module.exports = SHARED; else root.SHARED = SHARED;
 })(typeof self !== 'undefined' ? self : this);

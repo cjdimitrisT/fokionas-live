@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('./mini-ws.js');
 const SH = require('./shared.js');
-const VERSION = 12;   // shown at the server address, so you can check which version is running
+const VERSION = 13;   // shown at the server address, so you can check which version is running
 
 let CFG = {};
 try { CFG = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8')); } catch (e) {}
@@ -400,8 +400,9 @@ setInterval(() => {
       Math.round(B.prog * 100), Math.round(SH.bombNeed(G) * 10), B.progBy] : null;
     const ba = G.ball ? [R1(G.ball.x), R1(G.ball.y), R1(G.ball.vx), R1(G.ball.vy), G.ball.owner, Math.round(G.ball.bomb * 10)] : null;
     const so = G.soc ? [Math.round(G.soc.el * 10), G.soc.half, G.soc.stop > 0 ? 1 : 0, Math.round(G.soc.pause * 10)] : null;
+    const S = G.siege, sg = S ? [S.atk, S.half, Math.round(S.gate / S.gateMax * 1000), Math.round(S.crown / S.crownMax * 1000)] : null;
     const hb = G.hoop ? G.hoop.balls.map(b => [R1(b.x), R1(b.y), R1(b.h || 0), b.owner]) : null;
-    const base = { t: 's', bo, ba, so, hb, gt: Math.round(G.t * 1000) / 1000, time: Math.max(0, G.time), st: G.start, sc: SH.scores(G), e: ents, b: bul, c: coins, z: zones, m: mines, k: strikes, ev: G.ev };
+    const base = { t: 's', bo, ba, so, hb, sg, gt: Math.round(G.t * 1000) / 1000, time: Math.max(0, G.time), st: G.start, sc: SH.scores(G), e: ents, b: bul, c: coins, z: zones, m: mines, k: strikes, ev: G.ev };
     for (const h of r.humans) {
       const me = G.ents.find(e => e.pid === h.id);
       send(h, Object.assign({ me: me ? { sup: Math.round(me.sup * 100) / 100, resp: Math.min(99, Math.max(0, me.resp)), money: G.bomb ? me.money : null, nades: me.nades || 0 } : null }, base));
