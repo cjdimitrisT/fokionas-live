@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('./mini-ws.js');
 const SH = require('./shared.js');
-const VERSION = 14;   // shown at the server address, so you can check which version is running
+const VERSION = 15;   // shown at the server address, so you can check which version is running
 
 let CFG = {};
 try { CFG = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8')); } catch (e) {}
@@ -97,14 +97,14 @@ async function onMessage(c, m) {
     const clanId = typeof m.clan === 'string' && /^[a-f0-9]{8}$/.test(m.clan) ? m.clan : null;
     if (clanId) {   // clan practice: everyone available, all at level 30, no entry fee
       bid = SH.ROSTER[+m.bid] ? +m.bid : 0;
-      Object.assign(c, { mode: 3, bid, lvl: 30, wins, state: 'queue', joinedAt: Date.now() });
+      Object.assign(c, { mode: 3, bid, lvl: 30, wins, state: 'queue', joinedAt: Date.now(), vkey: 'c:' + clanId });   // clan-mates can talk
       let P = clanGroups.get(clanId);
       if (!P) { P = { id: clanId, name: String(m.clanName || 'Clan').slice(0, 16), members: [], t: Date.now(), ready: 0 }; clanGroups.set(clanId, P); }
       if (P.members.length < 3) P.members.push(c); c.clanGroup = clanId;
       for (const x of P.members) send(x, { t: 'clan', count: P.members.length, wait: Math.max(0, Math.ceil((P.t + CLAN_GATHER - Date.now()) / 1000)) });
       return;
     }
-    Object.assign(c, { mode, bid, lvl, wins, state: 'queue', joinedAt: Date.now() });
+    Object.assign(c, { mode, bid, lvl, wins, state: 'queue', joinedAt: Date.now(), vkey: null });
     const party = typeof m.party === 'string' && /^[a-f0-9]{6,16}$/.test(m.party) ? m.party : null;
     if (party) {   // playing with a friend: wait for them, not for strangers
       let P = parties.get(party);
@@ -113,7 +113,7 @@ async function onMessage(c, m) {
       if (P.members.length >= 2) {
         parties.delete(party);
         const [a, b] = P.members, n = P.kind === 'team' ? Math.max(2, P.mode) : P.mode;
-        for (const x of P.members) x.party = null;
+        for (const x of P.members) { x.party = null; x.vkey = 'p:' + party; }   // friends can talk
         makeRoom(n, [a, b], P.kind === 'team' ? [0, 0] : [0, 1]);
       } else send(c, { t: 'party', waiting: true });
       return;
@@ -124,6 +124,14 @@ async function onMessage(c, m) {
   if (m.t === 'tour_hello') return tourHello(c, m);
   if (m.t === 'leave') return leave(c);
   const r = c.room; if (!r) return;
+  if (m.t === 'rtc') {   // voice chat: pass the message on, only between friends / clan-mates in the same game
+    const to = r.humans.find(h => h.id === +m.to);
+    if (!to || to === c || !c.vkey || to.vkey !== c.vkey) return;
+    const sdp = m.sdp && typeof m.sdp.sdp === 'string' && m.sdp.sdp.length < 20000 && ['offer', 'answer'].includes(m.sdp.type) ? { type: m.sdp.type, sdp: m.sdp.sdp } : null;
+    const ice = m.ice && typeof m.ice.candidate === 'string' && m.ice.candidate.length < 2000 ? { candidate: m.ice.candidate, sdpMid: m.ice.sdpMid, sdpMLineIndex: m.ice.sdpMLineIndex } : null;
+    if (sdp || ice) send(to, { t: 'rtc', from: c.id, sdp, ice });
+    return;
+  }
   if (m.t === 'vote' && r.phase === 'vote' && SH.MAP_NAMES[m.map]) {
     r.votes.set(c.id, m.map);
     broadcast(r, { t: 'votes', votes: voteList(r) });
@@ -159,6 +167,7 @@ function leave(c) {
   const r = c.room;
   if (r) {
     r.humans = r.humans.filter(h => h !== c);
+    if (c.vkey) for (const h of r.humans) if (h.vkey === c.vkey) send(h, { t: 'voicegone', id: c.id });
     r.votes && r.votes.delete(c.id);
     if (r.G) { const e = r.G.ents.find(x => x.pid === c.id); if (e) { e.pid = null; e.ctrl = 'ai'; e.skill = .5; e.name += ' (bot)'; } }
     if (!r.humans.length && !r.tour) { clearTimeout(r.voteTimer); rooms.delete(r); }   // tournament games go on with bots
@@ -204,12 +213,17 @@ setInterval(() => {
 function broadcast(r, m) { for (const h of r.humans) send(h, m); }
 function voteList(r) { const v = {}; for (const k of Object.keys(SH.MAPS)) v[k] = []; for (const h of r.humans) { const x = r.votes.get(h.id); if (x) v[x].push(h.nick); } return v; }
 
+// voice chat groups: friends who came in together, or members of the same clan
+function voiceSetup(r) {
+  for (const h of r.humans) send(h, { t: 'voice', me: h.id, peers: h.vkey ? r.humans.filter(x => x !== h && x.vkey === h.vkey).map(x => ({ id: x.id, nick: x.nick })) : [] });
+}
 function makeRoom(mode, humans, teams, opt) {
   const r = { mode, humans, phase: 'vote', votes: new Map(), G: null, opt: opt || {} };
   humans.forEach((h, i) => { h.state = 'room'; h.room = r; h.team = teams ? teams[i] : i % 2; });
   rooms.add(r);
   broadcast(r, { t: 'room', mode, until: VOTE_TIME, players: humans.map(h => ({ nick: h.nick, pro: !!h.pro, w: h.w || 0, team: h.team, bid: h.bid, lvl: h.lvl })) });
   for (const h of humans) send(h, { t: 'you', team: h.team });
+  voiceSetup(r);
   r.voteTimer = setTimeout(() => endVote(r), VOTE_TIME);
 }
 
@@ -346,7 +360,8 @@ function startTourMatch(x) {
     return setTimeout(() => done(r.G), 300);
   }
   const humans = [...A, ...B], r = { mode: 3, humans, phase: 'vote', votes: new Map(), G: null, opt: { lvl30: true }, tour: x };
-  humans.forEach(h => { h.state = 'room'; h.room = r; h.team = A.includes(h) ? 0 : 1; send(h, { t: 'you', team: h.team }); });
+  humans.forEach(h => { h.state = 'room'; h.room = r; h.team = A.includes(h) ? 0 : 1; h.vkey = 'c:' + h.tourClan; send(h, { t: 'you', team: h.team }); });
+  voiceSetup(r);
   rooms.add(r);
   r.onEnd = done;
   startGame(r, map, false);
